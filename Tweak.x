@@ -2,59 +2,38 @@
 #import "DYPluginsMgr.h"
 #import "DYPluginsViewController.h"
 
-// 补全类声明，告诉编译器这是一个 UIViewController，拥有 navigationController 属性
-@interface AWESettingsViewController : UIViewController
-@end
-
-// 在这里集中注册你的插件
 static void initAllPlugins() {
     DYPluginsMgr *mgr = [DYPluginsMgr sharedInstance];
-    
-    // 示例：注册独立子页面（如 DYYY 的设置页）
     [mgr registerControllerWithTitle:@"DYYY 设置" version:@"v1.2" controller:@"DYYYSettingsViewController"];
-    
-    // 示例：注册独立功能开关
     [mgr registerSwitchWithTitle:@"无水印下载" key:@"DY_KEY_NO_WATERMARK"];
     [mgr registerSwitchWithTitle:@"自动连播" key:@"DY_KEY_AUTO_PLAY"];
 }
 
-// Hook 抖音设置控制器
 %hook AWESettingsViewController
 
 - (void)viewDidLoad {
     %orig;
     
-    NSMutableArray *sectionDataArray = [self valueForKey:@"sectionDataArray"];
-    if (!sectionDataArray || ![sectionDataArray isKindOfClass:[NSMutableArray class]]) {
-        return;
-    }
+    // 强行在导航栏右侧添加一个独立的“插件”按钮，免疫列表数据刷新
+    UIButton *pluginBtn = [UIButton buttonWithType:UIButtonTypeSystem];
+    [pluginBtn setTitle:@"⚙️插件" forState:UIControlStateNormal];
+    pluginBtn.titleLabel.font = [UIFont boldSystemFontOfSize:16];
+    [pluginBtn sizeToFit];
     
-    Class itemModelClass = NSClassFromString(@"AWESettingItemModel");
-    if (!itemModelClass) return;
+    // 绑定点击事件
+    [pluginBtn addTarget:self action:@selector(openDYPluginMgr_xy) forControlEvents:UIControlEventTouchUpInside];
     
-    id managerItem = [[itemModelClass alloc] init];
-    if ([managerItem respondsToSelector:@selector(setTitle:)]) {
-        [managerItem setValue:@"🛠️ 插件收纳中枢" forKey:@"title"];
-    }
-    
-    __weak typeof(self) weakSelf = self;
-    if ([managerItem respondsToSelector:@selector(setCellTappedBlock:)]) {
-        void (^tapBlock)(void) = ^{
-            DYPluginsViewController *pluginVC = [[DYPluginsViewController alloc] init];
-            [weakSelf.navigationController pushViewController:pluginVC animated:YES];
-        };
-        [managerItem setValue:tapBlock forKey:@"cellTappedBlock"];
-    }
-    
-    NSMutableArray *firstSection = [sectionDataArray firstObject];
-    if ([firstSection isKindOfClass:[NSMutableArray class]]) {
-        [firstSection insertObject:managerItem atIndex:0];
-    }
-    
-    UITableView *tableView = [self valueForKey:@"tableView"];
-    if (tableView) {
-        [tableView reloadData];
-    }
+    UIBarButtonItem *rightItem = [[UIBarButtonItem alloc] initWithCustomView:pluginBtn];
+    self.navigationItem.rightBarButtonItem = rightItem;
+}
+
+// 利用 %new 动态为该控制器添加我们自定义的跳转方法
+%new
+- (void)openDYPluginMgr_xy {
+    DYPluginsViewController *pluginVC = [[DYPluginsViewController alloc] init];
+    // 隐藏底部 TabBar 保证页面清爽
+    pluginVC.hidesBottomBarWhenPushed = YES; 
+    [self.navigationController pushViewController:pluginVC animated:YES];
 }
 
 %end
