@@ -27,6 +27,7 @@ jobs:
 
       - name: Install iOS SDK
         run: |
+          rm -rf ~/theos/sdks
           git clone https://github.com/theos/sdks.git ~/theos/sdks
 
       - name: Build Tweak
