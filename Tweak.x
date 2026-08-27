@@ -2,6 +2,10 @@
 #import "DYPluginsMgr.h"
 #import "DYPluginsViewController.h"
 
+// 补全类声明，告诉编译器这是一个 UIViewController，拥有 navigationController 属性
+@interface AWESettingsViewController : UIViewController
+@end
+
 // 在这里集中注册你的插件
 static void initAllPlugins() {
     DYPluginsMgr *mgr = [DYPluginsMgr sharedInstance];
