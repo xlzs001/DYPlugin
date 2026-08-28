@@ -31,9 +31,11 @@
 - (id)viewModel;
 @end
 
+
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static void *kDYPluginSearchHandlerKey = &kDYPluginSearchHandlerKey;
+
 
 static void RemoveRogueWatermarks(UIView *view) {
     if (!view) return;
@@ -44,33 +46,42 @@ static void RemoveRogueWatermarks(UIView *view) {
     }
     
     BOOL shouldRemove = NO;
+    NSString *viewText = nil;
     
-    if ([view isKindOfClass:[UIButton class]]) {
-        NSString *title = [(UIButton *)view currentTitle];
-        if ([title localizedCaseInsensitiveContainsString:@"XUU"] || [title localizedCaseInsensitiveContainsString:@"助手"]) {
-            shouldRemove = YES;
-        }
-    } else if ([view isKindOfClass:[UILabel class]]) {
-        NSString *text = [(UILabel *)view text];
-        if ([text localizedCaseInsensitiveContainsString:@"XUU"] || [text localizedCaseInsensitiveContainsString:@"助手"]) {
-            shouldRemove = YES;
-        }
-    } else if ([view isKindOfClass:[UITextView class]]) {
-        NSString *text = [(UITextView *)view text];
-        if ([text localizedCaseInsensitiveContainsString:@"XUU"] || [text localizedCaseInsensitiveContainsString:@"助手"]) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    if ([view respondsToSelector:@selector(text)]) {
+        id val = [view performSelector:@selector(text)];
+        if ([val isKindOfClass:[NSString class]]) viewText = val;
+    } else if ([view respondsToSelector:@selector(currentTitle)]) {
+        id val = [view performSelector:@selector(currentTitle)];
+        if ([val isKindOfClass:[NSString class]]) viewText = val;
+    } else if ([view isKindOfClass:[UIButton class]]) {
+        viewText = [(UIButton *)view titleForState:UIControlStateNormal];
+    }
+    #pragma clang diagnostic pop
+
+  
+    if (viewText) {
+        if ([viewText localizedCaseInsensitiveContainsString:@"抖音助手"] || 
+            [viewText localizedCaseInsensitiveContainsString:@"XUU"]) {
             shouldRemove = YES;
         }
     }
     
+  
     if (!shouldRemove) {
         NSString *className = NSStringFromClass([view class]);
-        if ([className localizedCaseInsensitiveContainsString:@"XUU"]) {
+        if ([className localizedCaseInsensitiveContainsString:@"抖音助手"] || 
+            [className localizedCaseInsensitiveContainsString:@"XUU"]) {
             shouldRemove = YES;
         }
     }
     
+ 
     if (shouldRemove) {
         view.hidden = YES;
+        view.alpha = 0.0;
         [view removeFromSuperview];
         return; 
     }
@@ -179,7 +190,6 @@ static void HarvestItem(id item) {
     [gHarvestedPlugins addObject:item];
 }
 
-
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
@@ -223,7 +233,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
-
 %hook AWESettingBaseViewController
 - (id)viewModel {
     id orig = %orig;
@@ -234,20 +243,27 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     
-
     __weak typeof(self) weakSelf = self;
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf && strongSelf.view && strongSelf.view.window) {
+
             RemoveRogueWatermarks(strongSelf.view);
+         
+            if (strongSelf.navigationController && strongSelf.navigationController.navigationBar) {
+                RemoveRogueWatermarks(strongSelf.navigationController.navigationBar);
+            }
         }
     });
     
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
         if (strongSelf && strongSelf.view && strongSelf.view.window) {
             RemoveRogueWatermarks(strongSelf.view);
+            if (strongSelf.navigationController && strongSelf.navigationController.navigationBar) {
+                RemoveRogueWatermarks(strongSelf.navigationController.navigationBar);
+            }
         }
     });
 }
@@ -255,10 +271,8 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 - (void)viewDidLoad {
     %orig;
     
- 
     RemoveRogueWatermarks(self.view);
     
-
     id customVM = objc_getAssociatedObject(self, kDYPluginViewModelKey);
     if (customVM) {
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
@@ -374,7 +388,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             [finalSections addObject:section];
             continue;
         }
-        NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
+        NSString *sectionTitle = [sectionHeaderTitle valueForKey:@"sectionHeaderTitle"];
         
         if ([sectionTitle isEqualToString:@"收纳"]) {
             hasMgrSection = YES;
