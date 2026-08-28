@@ -37,14 +37,14 @@
 // ==========================================
 // 2. 核心状态存储
 // ==========================================
-static NSMutableArray *gHarvestedSections = nil; 
+static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
 // ==========================================
-// 3. 超级模糊匹配识别器
+// 3. 超级精确匹配识别器 & 收割去重
 // ==========================================
-static BOOL IsTargetPluginTitle(NSString *title) {
+static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
         @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
@@ -53,46 +53,49 @@ static BOOL IsTargetPluginTitle(NSString *title) {
         @"DouyinHelper", @"Yuki"
     ];
     for (NSString *t in targets) {
-        if ([title containsString:t]) {
+        // 💡 修复：已改为精确匹配，防止误杀插件子页面的配置项
+        if ([title isEqualToString:t]) {
             return YES;
         }
     }
     return NO;
 }
 
-static BOOL IsPluginSection(id section) {
-    if (![section respondsToSelector:@selector(sectionHeaderTitle)]) return NO;
-    NSString *headerTitle = [section valueForKey:@"sectionHeaderTitle"];
-    if (IsTargetPluginTitle(headerTitle)) {
-        return YES;
-    }
+static void HarvestItem(id item) {
+    if (!item) return;
+    if (!gHarvestedPlugins) gHarvestedPlugins = [NSMutableArray array];
     
-    if ([section respondsToSelector:@selector(itemArray)]) {
-        NSArray *items = [section valueForKey:@"itemArray"];
-        for (id item in items) {
-            NSString *itemTitle = [item valueForKey:@"title"];
-            if (IsTargetPluginTitle(itemTitle)) {
-                return YES;
-            }
-        }
-    }
-    return NO;
-}
-
-static void HarvestSection(id section) {
-    if (!section) return;
-    if (!gHarvestedSections) gHarvestedSections = [NSMutableArray array];
+    NSString *identifier = [item valueForKey:@"identifier"];
+    NSString *title = [item valueForKey:@"title"];
     
-    NSString *secTitle = [section respondsToSelector:@selector(sectionHeaderTitle)] ? [section valueForKey:@"sectionHeaderTitle"] : nil;
-    
-    for (id existing in gHarvestedSections) {
-        NSString *exTitle = [existing respondsToSelector:@selector(sectionHeaderTitle)] ? [existing valueForKey:@"sectionHeaderTitle"] : nil;
-        if (secTitle && exTitle && [secTitle isEqualToString:exTitle]) {
-            return;
+    // 严格去重，防止多次进出设置导致重复添加
+    for (id existing in gHarvestedPlugins) {
+        NSString *exId = [existing valueForKey:@"identifier"];
+        NSString *exTitle = [existing valueForKey:@"title"];
+        if ((identifier && exId && [exId isEqualToString:identifier]) || 
+            (title && exTitle && [exTitle isEqualToString:title])) {
+            return; 
         }
     }
     
-    [gHarvestedSections addObject:section];
+    // ==========================================
+    // 💡 核心优化：拦截并重写插件的点击事件回调
+    // 确保在二级页面点击时，能正确传递上下文并安全触发原 Block
+    // ==========================================
+    @try {
+        void (^originalBlock)(void) = [item valueForKey:@"cellTappedBlock"];
+        if (originalBlock) {
+            void (^wrappedBlock)(void) = ^{
+                // 可以在此处注入适配逻辑，直接安全调用原插件的触发逻辑
+                originalBlock();
+            };
+            [item setValue:wrappedBlock forKey:@"cellTappedBlock"];
+        }
+    } @catch (NSException *exception) {
+        // 防止部分 KVC 异常导致崩溃
+    }
+    
+    [gHarvestedPlugins addObject:item];
 }
 
 // ==========================================
@@ -102,6 +105,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
     dispatch_async(dispatch_get_main_queue(), ^{
+        // 替换导航栏标题
         for (UIView *sub in subVC.view.subviews) {
             if ([sub isKindOfClass:NSClassFromString(@"AWENavigationBar")]) {
                 if ([sub respondsToSelector:@selector(titleLabel)]) {
@@ -111,9 +115,46 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
                 break;
             }
         }
+        
+        // 💡 新增：仿制原图底部水印样式，添加专属 GitHub 仓库地址
+        CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
+        CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
+        UILabel *footerLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, screenH - 180, screenW, 120)];
+        footerLabel.numberOfLines = 0;
+        footerLabel.textAlignment = NSTextAlignmentCenter;
+        // 保证其永远吸附在底部
+        footerLabel.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+        
+        NSMutableAttributedString *footerText = [[NSMutableAttributedString alloc] init];
+        
+        // 1. 绿色标题 (仿照原图的绿色)
+        NSAttributedString *line1 = [[NSAttributedString alloc] initWithString:@"开源仓库地址\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium], NSForegroundColorAttributeName: [UIColor colorWithRed:0.18 green:0.49 blue:0.36 alpha:1.0]}];
+        
+        // 2. 仓库地址 (灰色)
+        NSAttributedString *line2 = [[NSAttributedString alloc] initWithString:@"https://github.com/xlzs001/DYstorage\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12], NSForegroundColorAttributeName: [UIColor grayColor]}];
+        
+        // 3. 开发者信息 (灰色)
+        NSAttributedString *line3 = [[NSAttributedString alloc] initWithString:@"Developed by xlzs001\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12], NSForegroundColorAttributeName: [UIColor grayColor]}];
+        
+        // 4. 版权信息 (浅灰)
+        NSAttributedString *line4 = [[NSAttributedString alloc] initWithString:@"© 2026 xlzs001. All rights reserved." attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:11], NSForegroundColorAttributeName: [UIColor lightGrayColor]}];
+        
+        // 设置行间距
+        NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+        paragraphStyle.lineSpacing = 8;
+        paragraphStyle.alignment = NSTextAlignmentCenter;
+        
+        [footerText appendAttributedString:line1];
+        [footerText appendAttributedString:line2];
+        [footerText appendAttributedString:line3];
+        [footerText appendAttributedString:line4];
+        [footerText addAttribute:NSParagraphStyleAttributeName value:paragraphStyle range:NSMakeRange(0, footerText.length)];
+        
+        footerLabel.attributedText = footerText;
+        [subVC.view addSubview:footerLabel];
     });
 
-    if (!gHarvestedSections || gHarvestedSections.count == 0) {
+    if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
         gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     }
     if (gDummyViewModel) {
@@ -123,46 +164,16 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
+    // 关键：将当前二级页面赋给 viewModel 的 controllerDelegate，供插件内部调用 UI 弹窗等方法
     [viewModel setValue:subVC forKey:@"controllerDelegate"];
     
-    NSMutableArray *finalSectionArray = [NSMutableArray array];
+    id section = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
+    [section setValue:@"已收纳的插件" forKey:@"sectionHeaderTitle"];
+    [section setValue:@(40) forKey:@"sectionHeaderHeight"];
+    [section setValue:@(0) forKey:@"type"];
+    [section setValue:(gHarvestedPlugins ? [gHarvestedPlugins copy] : @[]) forKey:@"itemArray"];
     
-    if (gHarvestedSections) {
-        [finalSectionArray addObjectsFromArray:gHarvestedSections];
-    }
-    
-    NSMutableArray *repoItems = [NSMutableArray array];
-    AWESettingItemModel *repoItem = [[%c(AWESettingItemModel) alloc] init];
-    repoItem.identifier = @"DYPluginRepoAddress";
-    repoItem.title = @"仓库地址";
-    repoItem.detail = @"点击访问 GitHub / 源码";
-    repoItem.type = 0;
-    repoItem.svgIconImageName = @"ic_link_outlined_20";
-    repoItem.cellType = 26; 
-    repoItem.colorStyle = 0;
-    repoItem.isEnable = YES;
-    
-    repoItem.cellTappedBlock = ^{
-        NSURL *url = [NSURL URLWithString:@"https://github.com/xlzs001/DYstorage"];
-        if (url) {
-            if (@available(iOS 10.0, *)) {
-                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
-            } else {
-                [[UIApplication sharedApplication] openURL:url];
-            }
-        }
-    };
-    [repoItems addObject:repoItem];
-
-    id repoSection = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
-    [repoSection setValue:@"关于项目" forKey:@"sectionHeaderTitle"];
-    [repoSection setValue:@(40) forKey:@"sectionHeaderHeight"];
-    [repoSection setValue:@(0) forKey:@"type"];
-    [repoSection setValue:repoItems forKey:@"itemArray"];
-    
-    [finalSectionArray addObject:repoSection];
-
-    [viewModel setValue:finalSectionArray forKey:@"sectionDataArray"];
+    [viewModel setValue:@[section] forKey:@"sectionDataArray"];
     objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
     UIViewController *topVC = rootVC;
@@ -191,7 +202,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 %end
 
 // ==========================================
-// 5. 第一重清洗：拦截主页区块
+// 5. 第一重清洗：拦截宏观区块
 // ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
@@ -223,8 +234,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             continue;
         }
         
-        if (IsPluginSection(section)) {
-            HarvestSection(section);
+        if (IsTargetPlugin(sectionTitle)) {
+            NSArray *items = [section valueForKey:@"itemArray"];
+            for (id item in items) HarvestItem(item);
             continue; 
         }
         
@@ -235,7 +247,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
         entry.identifier = @"DYPluginMgr";
         entry.title = @"收纳"; 
-        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个插件", (unsigned long)(gHarvestedSections.count)];
+        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)(gHarvestedPlugins.count)];
         entry.type = 0;
         entry.svgIconImageName = @"ic_gearsimplify_outlined_20";
         entry.cellType = 26; 
@@ -264,7 +276,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 %end
 
 // ==========================================
-// 6. 第二重清洗：防止漏网之鱼
+// 6. 第二重清洗：终极底层拦截
 // ==========================================
 %hook AWESettingSectionModel
 - (NSArray *)itemArray {
@@ -276,14 +288,30 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         headerTitle = [self valueForKey:@"sectionHeaderTitle"];
     }
     
-    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"] || [headerTitle isEqualToString:@"关于项目"]) {
+    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"]) {
         return items;
     }
     
+    BOOL hasPlugin = NO;
+    for (id item in items) {
+        NSString *itemTitle = [item valueForKey:@"title"];
+        if (IsTargetPlugin(itemTitle)) {
+            hasPlugin = YES; 
+            break;
+        }
+    }
+    
+    if (!hasPlugin) return items;
+    
     NSMutableArray *cleanItems = [NSMutableArray array];
     for (id item in items) {
-        [cleanItems addObject:item];
+        NSString *itemTitle = [item valueForKey:@"title"];
+        if (IsTargetPlugin(itemTitle)) {
+            HarvestItem(item); 
+        } else {
+            [cleanItems addObject:item]; 
+        }
     }
-    return cleanItems;
+    return cleanItems; 
 }
 %end
