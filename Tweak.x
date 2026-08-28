@@ -2,7 +2,6 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
@@ -34,33 +33,35 @@
 
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
-static id gDummyViewModel = nil; 
-
+static void *kDYPluginSearchHandlerKey = &kDYPluginSearchHandlerKey;
 
 static void RemoveRogueWatermarks(UIView *view) {
     if (!view) return;
     
+
+    if ([view isKindOfClass:[UITableViewCell class]] || [view isKindOfClass:[UICollectionViewCell class]]) {
+        return;
+    }
+    
     BOOL shouldRemove = NO;
     
- 
     if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        NSString *title = [btn currentTitle];
+        NSString *title = [(UIButton *)view currentTitle];
         if ([title localizedCaseInsensitiveContainsString:@"XUU"] || [title localizedCaseInsensitiveContainsString:@"助手"]) {
             shouldRemove = YES;
         }
-    }
- 
-    else if ([view respondsToSelector:@selector(text)] && ![view isKindOfClass:[UITextField class]]) {
-        NSString *text = [view valueForKey:@"text"];
-        if (text && [text isKindOfClass:[NSString class]]) {
-            if ([text localizedCaseInsensitiveContainsString:@"XUU"]) {
-                shouldRemove = YES;
-            }
+    } else if ([view isKindOfClass:[UILabel class]]) {
+        NSString *text = [(UILabel *)view text];
+        if ([text localizedCaseInsensitiveContainsString:@"XUU"] || [text localizedCaseInsensitiveContainsString:@"助手"]) {
+            shouldRemove = YES;
+        }
+    } else if ([view isKindOfClass:[UITextView class]]) {
+        NSString *text = [(UITextView *)view text];
+        if ([text localizedCaseInsensitiveContainsString:@"XUU"] || [text localizedCaseInsensitiveContainsString:@"助手"]) {
+            shouldRemove = YES;
         }
     }
     
-   
     if (!shouldRemove) {
         NSString *className = NSStringFromClass([view class]);
         if ([className localizedCaseInsensitiveContainsString:@"XUU"]) {
@@ -68,14 +69,12 @@ static void RemoveRogueWatermarks(UIView *view) {
         }
     }
     
-
     if (shouldRemove) {
         view.hidden = YES;
         [view removeFromSuperview];
         return; 
     }
     
-
     NSArray *subviews = [view.subviews copy];
     for (UIView *subview in subviews) {
         RemoveRogueWatermarks(subview);
@@ -127,8 +126,6 @@ static void RemoveRogueWatermarks(UIView *view) {
     });
 }
 @end
-
-static DYPluginSearchHandler *gSearchHandler = nil;
 
 
 static BOOL IsTargetPlugin(NSString *title) {
@@ -182,15 +179,17 @@ static void HarvestItem(id item) {
     [gHarvestedPlugins addObject:item];
 }
 
+
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
     if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
-        gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
-    }
-    if (gDummyViewModel) {
-        [gDummyViewModel setValue:subVC forKey:@"controllerDelegate"];
-        [gDummyViewModel performSelector:@selector(sectionDataArray)];
+        @try {
+            id dummyVM = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
+            [dummyVM setValue:subVC forKey:@"controllerDelegate"];
+            [dummyVM performSelector:@selector(sectionDataArray)];
+            [dummyVM setValue:nil forKey:@"controllerDelegate"];
+        } @catch (NSException *e) {}
     }
     
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
@@ -232,42 +231,38 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     return orig;
 }
 
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
-        RemoveRogueWatermarks(self.view);
-    }
-}
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
-        RemoveRogueWatermarks(self.view);
-    }
-}
-
-
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            RemoveRogueWatermarks(self.view);
-        });
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            RemoveRogueWatermarks(self.view);
-        });
-    }
+    
+
+    __weak typeof(self) weakSelf = self;
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && strongSelf.view && strongSelf.view.window) {
+            RemoveRogueWatermarks(strongSelf.view);
+        }
+    });
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (strongSelf && strongSelf.view && strongSelf.view.window) {
+            RemoveRogueWatermarks(strongSelf.view);
+        }
+    });
 }
 
 - (void)viewDidLoad {
     %orig;
     
+ 
+    RemoveRogueWatermarks(self.view);
+    
+
     id customVM = objc_getAssociatedObject(self, kDYPluginViewModelKey);
     if (customVM) {
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-        
-        RemoveRogueWatermarks(self.view);
         
         CGFloat navBottomY = 88.0; 
         for (UIView *sub in self.view.subviews) {
@@ -285,7 +280,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         
         UITextField *searchBox = [[UITextField alloc] initWithFrame:CGRectMake(16, 10, screenW - 32, 36)];
         searchBox.placeholder = @"🔍 怎么能够做到全局搜索啊";
-      
         searchBox.textAlignment = NSTextAlignmentCenter; 
         searchBox.backgroundColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.96 alpha:1.0];
         searchBox.layer.cornerRadius = 8;
@@ -296,13 +290,12 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         
         [headerContainer addSubview:searchBox];
         
-        if (!gSearchHandler) {
-            gSearchHandler = [[DYPluginSearchHandler alloc] init];
-        }
-        gSearchHandler.targetVC = self;
-        gSearchHandler.viewModel = customVM;
+        DYPluginSearchHandler *handler = [[DYPluginSearchHandler alloc] init];
+        handler.targetVC = self;
+        handler.viewModel = customVM;
+        objc_setAssociatedObject(self, kDYPluginSearchHandlerKey, handler, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         
-        [searchBox addTarget:gSearchHandler action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
+        [searchBox addTarget:handler action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
         
         BOOL injectedAsHeader = NO;
         for (UIView *v in self.view.subviews) {
