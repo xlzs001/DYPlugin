@@ -1,104 +1,135 @@
 #import <UIKit/UIKit.h>
-#import "DYPluginsMgr.h"
-#import "DYPluginsViewController.h"
 
-// 提前声明抖音原生的 Model 类，防止编译器报错
+// 1. 声明模型
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) NSString *detail;
 @property (nonatomic, assign) NSInteger type;
+@property (nonatomic, copy) NSString *svgIconImageName;
 @property (nonatomic, assign) NSInteger cellType;
+@property (nonatomic, assign) NSInteger colorStyle;
 @property (nonatomic, assign) BOOL isEnable;
 @property (nonatomic, copy) void (^cellTappedBlock)(void);
 @end
 
 @interface AWESettingSectionModel : NSObject
-@property (nonatomic, copy) NSString *sectionHeaderTitle;
-@property (nonatomic, assign) CGFloat sectionHeaderHeight;
 @property (nonatomic, assign) NSInteger type;
+@property (nonatomic, assign) CGFloat sectionHeaderHeight;
+@property (nonatomic, copy) NSString *sectionHeaderTitle;
 @property (nonatomic, strong) NSArray *itemArray;
 @end
 
 @interface AWESettingsViewModel : NSObject
-// ViewModel 会持有当前的视图控制器，方便我们跳转
-@property (nonatomic, weak) UIViewController *controllerDelegate;
+@property (nonatomic, weak) id controllerDelegate;
 @end
 
+// 静态数组：专门用来存放被我们“收割”来的各大插件入口
+static NSMutableArray *gHarvestedPlugins = nil;
 
-// 初始化你的插件中枢
-static void initAllPlugins() {
-    DYPluginsMgr *mgr = [DYPluginsMgr sharedInstance];
-    
-    // 这里依然是你主动收纳 DYYY 等插件的地方
-    [mgr registerControllerWithTitle:@"DYYY 增强设置" version:@"稳定版" controller:@"DYYYSettingsViewController"];
-}
-
-// 拦截 ViewModel，从数据源头强行注入，免疫任何界面刷新
 %hook AWESettingsViewModel
 
 - (NSArray *)sectionDataArray {
-    // 拿到抖音原生本来要显示的菜单数组
+    // 1. 获取原数组（此时 DYYY 和 DYKiller 的钩子已经执行完，把它们自己加进去了）
     NSArray *originalSections = %orig;
+    if (![originalSections isKindOfClass:[NSArray class]]) return originalSections;
+
+    BOOL isMainPage = NO;
+    for (AWESettingSectionModel *s in originalSections) {
+        if ([s respondsToSelector:@selector(sectionHeaderTitle)] && [s.sectionHeaderTitle isEqualToString:@"账号"]) {
+            isMainPage = YES;
+            break;
+        }
+    }
     
-    BOOL hasMyPlugin = NO;
-    BOOL isMainSettingsPage = NO;
+    // 如果不是设置主页，安全放行
+    if (!isMainPage) return originalSections;
 
-    // 遍历检查：看看是不是设置页主页（有“账号”这栏），以及是不是已经有我们的菜单了
+    // 初始化我们的“收割筐”
+    if (!gHarvestedPlugins) {
+        gHarvestedPlugins = [NSMutableArray array];
+    } else {
+        [gHarvestedPlugins removeAllObjects];
+    }
+
+    NSMutableArray *finalSections = [NSMutableArray array];
+    
+    // 2. 遍历原数组，执行收割！
     for (AWESettingSectionModel *section in originalSections) {
-        if ([section.sectionHeaderTitle isEqualToString:@"插件收纳"]) {
-            hasMyPlugin = YES;
-        }
-        if ([section.sectionHeaderTitle isEqualToString:@"账号"]) {
-            isMainSettingsPage = YES;
-        }
-    }
-
-    // 确认是主设置页，且还没添加过，就创建我们的专属菜单
-    if (isMainSettingsPage && !hasMyPlugin) {
-        // 1. 创建属于我们的点击项 (Item)
-        AWESettingItemModel *pluginItem = [[%c(AWESettingItemModel) alloc] init];
-        pluginItem.identifier = @"DYPluginMgr_Entrance";
-        pluginItem.title = @"🛠️ 插件收纳中枢";
-        pluginItem.type = 0;
-        pluginItem.cellType = 26; // 抖音原生的标准“向右箭头”Cell样式
-        pluginItem.isEnable = YES;
-
-        __weak typeof(self) weakSelf = self;
-        pluginItem.cellTappedBlock = ^{
-            // 从 ViewModel 里反向拿到当前的 ViewController 用来做页面跳转
-            UIViewController *rootVC = nil;
-            if ([weakSelf respondsToSelector:@selector(controllerDelegate)]) {
-                rootVC = weakSelf.controllerDelegate;
-            }
-
-            if (rootVC && rootVC.navigationController) {
-                DYPluginsViewController *pluginVC = [[DYPluginsViewController alloc] init];
-                pluginVC.hidesBottomBarWhenPushed = YES;
-                [rootVC.navigationController pushViewController:pluginVC animated:YES];
-            }
-        };
-
-        // 2. 将点击项包装成一个区块 (Section)
-        AWESettingSectionModel *newSection = [[%c(AWESettingSectionModel) alloc] init];
-        newSection.sectionHeaderTitle = @"插件收纳";
-        newSection.sectionHeaderHeight = 40;
-        newSection.type = 0;
-        newSection.itemArray = @[pluginItem];
-
-        // 3. 把我们的区块强势插入到原数组的第一个位置
-        NSMutableArray *newSections = [NSMutableArray arrayWithArray:originalSections];
-        [newSections insertObject:newSection atIndex:0];
+        NSString *title = section.sectionHeaderTitle;
         
-        return newSections;
+        // 只要发现是其他插件，统统没收！
+        if ([title isEqualToString:@"DYYY"] || [title isEqualToString:@"DYKiller"] || [title isEqualToString:@"插件收纳"]) {
+            if (section.itemArray.count > 0) {
+                // 把它们带跳转事件的入口装进我们的口袋
+                [gHarvestedPlugins addObjectsFromArray:section.itemArray];
+            }
+            // 注意：这里没有把它们加入 finalSections，所以它们在外面被隐藏了！
+        } else {
+            // 抖音原生的正常设置项，放行
+            [finalSections addObject:section];
+        }
     }
 
-    return originalSections;
+    // 3. 建立我们独一无二的入口
+    AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
+    entry.identifier = @"DYPluginMgr";
+    entry.title = @"插件收纳";
+    entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)gHarvestedPlugins.count];
+    entry.type = 0;
+    entry.svgIconImageName = @"ic_gearsimplify_outlined_20";
+    entry.cellType = 26; 
+    entry.colorStyle = 0;
+    entry.isEnable = YES;
+
+    // 4. 点击弹出底部“收纳菜单”
+    __weak AWESettingsViewModel *weakSelf = self;
+    entry.cellTappedBlock = ^{
+        __strong AWESettingsViewModel *strongSelf = weakSelf;
+        if (strongSelf && strongSelf.controllerDelegate) {
+            UIViewController *rootVC = (UIViewController *)strongSelf.controllerDelegate;
+            
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插件收纳" 
+                                                                           message:@"请选择要配置的插件" 
+                                                                    preferredStyle:UIAlertControllerStyleActionSheet];
+            
+            // 把收割来的插件全部做成按钮
+            for (AWESettingItemModel *plugin in gHarvestedPlugins) {
+                if ([plugin.identifier isEqualToString:@"DYPluginMgr"]) continue; // 排除自己
+                
+                UIAlertAction *action = [UIAlertAction actionWithTitle:plugin.title 
+                                                                 style:UIAlertActionStyleDefault 
+                                                               handler:^(UIAlertAction * _Nonnull action) {
+                    // 完美触发它们原生写好的跳转代码！
+                    if (plugin.cellTappedBlock) {
+                        plugin.cellTappedBlock();
+                    }
+                }];
+                [alert addAction:action];
+            }
+            
+            [alert addAction:[UIAlertAction actionWithTitle:@"取消" style:UIAlertActionStyleCancel handler:nil]];
+            
+            // 兼容 iPad
+            if (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad) {
+                alert.popoverPresentationController.sourceView = rootVC.view;
+                alert.popoverPresentationController.sourceRect = CGRectMake(rootVC.view.bounds.size.width / 2.0, rootVC.view.bounds.size.height / 2.0, 1.0, 1.0);
+            }
+            
+            [rootVC presentViewController:alert animated:YES completion:nil];
+        }
+    };
+
+    AWESettingSectionModel *mgrSection = [[%c(AWESettingSectionModel) alloc] init];
+    mgrSection.itemArray = @[ entry ];
+    mgrSection.type = 0;
+    mgrSection.sectionHeaderHeight = 40;
+    mgrSection.sectionHeaderTitle = @"插件收纳";
+
+    // 插在最上面
+    [finalSections insertObject:mgrSection atIndex:0];
+    
+    return finalSections;
 }
 
 %end
-
-%ctor {
-    @autoreleasepool {
-        initAllPlugins();
-    }
-}
