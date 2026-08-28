@@ -1,3 +1,4 @@
+#import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
@@ -25,6 +26,8 @@
 
 @interface AWESettingsViewModel : NSObject
 @property (nonatomic, weak) id controllerDelegate;
+@property (nonatomic, strong) NSArray *sectionDataArray;
+@property (nonatomic, assign) NSInteger colorStyle;
 @end
 
 @interface AWESettingBaseViewController : UIViewController
@@ -36,13 +39,13 @@
 // ==========================================
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
-static id gDummyViewModel = nil; 
 
 // ==========================================
-// 3. 模糊匹配识别器 & 原生安全收割
+// 3. 超级模糊匹配识别器 & 【实时换血收割器】
 // ==========================================
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
+    // 增加对"抖+"各种特殊上标、全角符号的模糊匹配防漏
     NSArray *targets = @[
         @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
         @"抖音图层", @"抖+", @"抖⁺", @"抖＋", @"aweJ", 
@@ -58,17 +61,22 @@ static BOOL IsTargetPlugin(NSString *title) {
 }
 
 static void HarvestItem(id item) {
-    if (!item) return;
+    if (!item || ![item isKindOfClass:NSClassFromString(@"AWESettingItemModel")]) return;
     if (!gHarvestedPlugins) gHarvestedPlugins = [NSMutableArray array];
     
-    NSString *identifier = [item valueForKey:@"identifier"];
-    NSString *title = [item valueForKey:@"title"];
+    NSString *identifier = [item respondsToSelector:@selector(identifier)] ? [item valueForKey:@"identifier"] : nil;
+    NSString *title = [item respondsToSelector:@selector(title)] ? [item valueForKey:@"title"] : nil;
     
-    for (id existing in gHarvestedPlugins) {
-        NSString *exId = [existing valueForKey:@"identifier"];
-        NSString *exTitle = [existing valueForKey:@"title"];
+    // 【核心修复：指针实时换血】
+    // 只要发现同名插件，直接替换掉旧的！保证插件绑定的环境指针永远不死！
+    for (int i = 0; i < gHarvestedPlugins.count; i++) {
+        id existing = gHarvestedPlugins[i];
+        NSString *exId = [existing respondsToSelector:@selector(identifier)] ? [existing valueForKey:@"identifier"] : nil;
+        NSString *exTitle = [existing respondsToSelector:@selector(title)] ? [existing valueForKey:@"title"] : nil;
+        
         if ((identifier && exId && [exId isEqualToString:identifier]) || 
             (title && exTitle && [exTitle isEqualToString:title])) {
+            [gHarvestedPlugins replaceObjectAtIndex:i withObject:item]; // 覆盖刷新！
             return; 
         }
     }
@@ -76,7 +84,7 @@ static void HarvestItem(id item) {
 }
 
 // ==========================================
-// 4. 构建原生二级页面 (绝对禁止使用 Wrapper)
+// 4. 构建原生二级页面 (绝对不使用 Wrapper)
 // ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
@@ -93,14 +101,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
     });
 
-    if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
-        gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
-    }
-    if (gDummyViewModel) {
-        [gDummyViewModel setValue:subVC forKey:@"controllerDelegate"];
-        [gDummyViewModel performSelector:@selector(sectionDataArray)];
-    }
-    
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
     
@@ -109,7 +109,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     [section setValue:@(40) forKey:@"sectionHeaderHeight"];
     [section setValue:@(0) forKey:@"type"];
     
-    // 原封不动地把原生插件对象装进去
+    // ⚠️ 完全不使用替身，直接把原汁原味的插件模型放进我们的二级列表里
     [section setValue:(gHarvestedPlugins ? [gHarvestedPlugins copy] : @[]) forKey:@"itemArray"];
     
     [viewModel setValue:@[section] forKey:@"sectionDataArray"];
@@ -133,7 +133,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 
 // ==========================================
-// 5. 【新增核心】：不包装插件，在视图层直接劫持点击，退回主页唤醒
+// 5. 视图层：双重清洗防漏网
 // ==========================================
 %hook AWESettingBaseViewController
 
@@ -143,47 +143,92 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     return orig;
 }
 
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    // 仅在我们的“收纳”子页面中生效
-    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
-        id viewModel = [self viewModel];
-        if ([viewModel respondsToSelector:@selector(sectionDataArray)]) {
-            NSArray *sections = [viewModel sectionDataArray];
-            if (indexPath.section < sections.count) {
-                id section = sections[indexPath.section];
-                if ([section respondsToSelector:@selector(itemArray)]) {
-                    NSArray *items = [section valueForKey:@"itemArray"];
-                    if (indexPath.row < items.count) {
-                        id item = items[indexPath.row];
-                        void (^block)(void) = [item respondsToSelector:@selector(cellTappedBlock)] ? [item valueForKey:@"cellTappedBlock"] : nil;
-                        
-                        if (block) {
-                            [tableView deselectRowAtIndexPath:indexPath animated:YES];
-                            
-                            // 1. 无动画秒退子页面
-                            if (self.navigationController) {
-                                [self.navigationController popViewControllerAnimated:NO];
-                            } else {
-                                [self dismissViewControllerAnimated:NO completion:nil];
-                            }
-                            
-                            // 2. 延迟 0.05 秒，在最外层主设置页的环境下触发 DYYY/Yuki 等插件的原生跳转
-                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                                block();
-                            });
-                            return; 
-                        }
-                    }
+// 页面展现前的深度清洗，根除“通用”里寄生的图层和抖+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    
+    id viewModel = [self viewModel];
+    if (!viewModel || ![viewModel respondsToSelector:@selector(sectionDataArray)]) return;
+    
+    NSArray *sections = [viewModel sectionDataArray];
+    if (![sections isKindOfClass:[NSArray class]]) return;
+    
+    BOOL isMainPage = NO;
+    for (id s in sections) {
+        NSString *title = [s respondsToSelector:@selector(sectionHeaderTitle)] ? [s valueForKey:@"sectionHeaderTitle"] : nil;
+        if ([title isEqualToString:@"账号"]) { isMainPage = YES; break; }
+    }
+    if (!isMainPage) return; // 绝对不清洗子页面，免疫崩溃
+
+    BOOL needReload = NO;
+    NSMutableArray *finalSections = [NSMutableArray array];
+    
+    for (id section in sections) {
+        if (![section respondsToSelector:@selector(sectionHeaderTitle)]) {
+            [finalSections addObject:section];
+            continue;
+        }
+        
+        NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
+        
+        if ([sectionTitle isEqualToString:@"收纳"]) {
+            NSArray *items = [section respondsToSelector:@selector(itemArray)] ? [section valueForKey:@"itemArray"] : nil;
+            if ([items isKindOfClass:[NSArray class]] && items.count > 0) {
+                id entry = items.firstObject;
+                NSString *currentDetail = [entry valueForKey:@"detail"];
+                NSString *newDetail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)gHarvestedPlugins.count];
+                if (![currentDetail isEqualToString:newDetail]) {
+                    [entry setValue:newDetail forKey:@"detail"];
+                    needReload = YES;
                 }
             }
+            [finalSections addObject:section];
+            continue;
+        }
+        
+        // 专门切除通用列表里的寄生插件
+        NSArray *items = [section respondsToSelector:@selector(itemArray)] ? [section valueForKey:@"itemArray"] : nil;
+        if ([items isKindOfClass:[NSArray class]]) {
+            NSMutableArray *cleanItems = [NSMutableArray array];
+            BOOL sectionModified = NO;
+            for (id item in items) {
+                NSString *itemTitle = [item respondsToSelector:@selector(title)] ? [item valueForKey:@"title"] : nil;
+                if (IsTargetPlugin(itemTitle)) {
+                    HarvestItem(item); // 没收！
+                    sectionModified = YES;
+                    needReload = YES;
+                } else {
+                    [cleanItems addObject:item];
+                }
+            }
+            if (sectionModified) {
+                [section setValue:cleanItems forKey:@"itemArray"];
+            }
+            if (cleanItems.count > 0 || items.count == 0) {
+                [finalSections addObject:section];
+            }
+        } else {
+            [finalSections addObject:section];
         }
     }
-    %orig; 
+    
+    if (needReload) {
+        [viewModel setValue:finalSections forKey:@"sectionDataArray"];
+        UITableView *tv = [self respondsToSelector:@selector(tableView)] ? [self valueForKey:@"tableView"] : nil;
+        if (!tv) {
+            for (UIView *v in self.view.subviews) {
+                if ([v isKindOfClass:[UITableView class]]) { tv = (UITableView *)v; break; }
+            }
+        }
+        if (tv && [tv respondsToSelector:@selector(reloadData)]) {
+            [tv reloadData];
+        }
+    }
 }
 %end
 
 // ==========================================
-// 6. 第一重拦截：独立区块收割
+// 6. 数据源拦截：独立区块收割
 // ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
@@ -193,8 +238,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     BOOL isMainPage = NO;
     for (id s in originalSections) {
         if ([s respondsToSelector:@selector(sectionHeaderTitle)] && [[s valueForKey:@"sectionHeaderTitle"] isEqualToString:@"账号"]) {
-            isMainPage = YES;
-            break;
+            isMainPage = YES; break;
         }
     }
     
@@ -217,8 +261,10 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
         
         if (IsTargetPlugin(sectionTitle)) {
-            NSArray *items = [section valueForKey:@"itemArray"];
-            for (id item in items) HarvestItem(item);
+            NSArray *items = [section respondsToSelector:@selector(itemArray)] ? [section valueForKey:@"itemArray"] : nil;
+            if ([items isKindOfClass:[NSArray class]]) {
+                for (id item in items) HarvestItem(item);
+            }
             continue; 
         }
         
@@ -226,7 +272,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 
     if (!hasMgrSection) {
-        AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
+        AWESettingItemModel *entry = [[NSClassFromString(@"AWESettingItemModel") alloc] init];
         entry.identifier = @"DYPluginMgr";
         entry.title = @"收纳"; 
         entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)(gHarvestedPlugins.count)];
@@ -254,46 +300,5 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
     
     return finalSections;
-}
-%end
-
-// ==========================================
-// 7. 第二重拦截：内部选项透视收割
-// ==========================================
-%hook AWESettingSectionModel
-- (NSArray *)itemArray {
-    NSArray *items = %orig;
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return items;
-
-    NSString *headerTitle = nil;
-    if ([self respondsToSelector:@selector(sectionHeaderTitle)]) {
-        headerTitle = [self valueForKey:@"sectionHeaderTitle"];
-    }
-    
-    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"]) {
-        return items;
-    }
-    
-    BOOL hasPlugin = NO;
-    for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            hasPlugin = YES; 
-            break;
-        }
-    }
-    
-    if (!hasPlugin) return items;
-    
-    NSMutableArray *cleanItems = [NSMutableArray array];
-    for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            HarvestItem(item);
-        } else {
-            [cleanItems addObject:item];
-        }
-    }
-    return cleanItems;
 }
 %end
