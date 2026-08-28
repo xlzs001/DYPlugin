@@ -2,9 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ==========================================
-// 1. 声明抖音原生模型
-// ==========================================
+
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
@@ -34,45 +32,57 @@
 - (id)viewModel;
 @end
 
-// ==========================================
-// 2. 核心状态存储
-// ==========================================
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
-// ==========================================
-// 3. 递归查杀流氓水印 (深层扫描)
-// ==========================================
+
 static void RemoveRogueWatermarks(UIView *view) {
     if (!view) return;
     
-    // 检查 UILabel
-    if ([view isKindOfClass:[UILabel class]]) {
-        UILabel *lbl = (UILabel *)view;
-        if ([lbl.text localizedCaseInsensitiveContainsString:@"XUU"]) {
-            lbl.hidden = YES;
-            [lbl removeFromSuperview];
+    BOOL shouldRemove = NO;
+    
+ 
+    if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        NSString *title = [btn currentTitle];
+        if ([title localizedCaseInsensitiveContainsString:@"XUU"] || [title localizedCaseInsensitiveContainsString:@"助手"]) {
+            shouldRemove = YES;
         }
     }
-    // 检查 UIButton (以防万一它是按钮)
-    else if ([view isKindOfClass:[UIButton class]]) {
-        UIButton *btn = (UIButton *)view;
-        if ([btn.currentTitle localizedCaseInsensitiveContainsString:@"XUU"]) {
-            btn.hidden = YES;
-            [btn removeFromSuperview];
+ 
+    else if ([view respondsToSelector:@selector(text)] && ![view isKindOfClass:[UITextField class]]) {
+        NSString *text = [view valueForKey:@"text"];
+        if (text && [text isKindOfClass:[NSString class]]) {
+            if ([text localizedCaseInsensitiveContainsString:@"XUU"]) {
+                shouldRemove = YES;
+            }
         }
     }
     
-    // 递归遍历所有子视图
-    for (UIView *subview in view.subviews) {
+   
+    if (!shouldRemove) {
+        NSString *className = NSStringFromClass([view class]);
+        if ([className localizedCaseInsensitiveContainsString:@"XUU"]) {
+            shouldRemove = YES;
+        }
+    }
+    
+
+    if (shouldRemove) {
+        view.hidden = YES;
+        [view removeFromSuperview];
+        return; 
+    }
+    
+
+    NSArray *subviews = [view.subviews copy];
+    for (UIView *subview in subviews) {
         RemoveRogueWatermarks(subview);
     }
 }
 
-// ==========================================
-// 4. 搜索处理中心
-// ==========================================
+
 @interface DYPluginSearchHandler : NSObject
 @property (nonatomic, weak) UIViewController *targetVC;
 @property (nonatomic, weak) id viewModel;
@@ -120,9 +130,7 @@ static void RemoveRogueWatermarks(UIView *view) {
 
 static DYPluginSearchHandler *gSearchHandler = nil;
 
-// ==========================================
-// 5. 精确匹配 & 僵尸上下文去重
-// ==========================================
+
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
@@ -174,9 +182,6 @@ static void HarvestItem(id item) {
     [gHarvestedPlugins addObject:item];
 }
 
-// ==========================================
-// 6. 构建并跳转二级页面
-// ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
@@ -219,9 +224,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
-// ==========================================
-// 7. 视图拦截：强制查杀水印、搜索栏与底部版权
-// ==========================================
+
 %hook AWESettingBaseViewController
 - (id)viewModel {
     id orig = %orig;
@@ -229,7 +232,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     return orig;
 }
 
-// 💡 新增：在页面生命周期的不同阶段强制清理水印，防遗漏
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
@@ -244,6 +246,19 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            RemoveRogueWatermarks(self.view);
+        });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            RemoveRogueWatermarks(self.view);
+        });
+    }
+}
+
 - (void)viewDidLoad {
     %orig;
     
@@ -252,7 +267,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
         
-        // 初次清理水印
         RemoveRogueWatermarks(self.view);
         
         CGFloat navBottomY = 88.0; 
@@ -271,7 +285,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         
         UITextField *searchBox = [[UITextField alloc] initWithFrame:CGRectMake(16, 10, screenW - 32, 36)];
         searchBox.placeholder = @"🔍 怎么能够做到全局搜索啊";
-        // 💡 修复：设置文字居中
+      
         searchBox.textAlignment = NSTextAlignmentCenter; 
         searchBox.backgroundColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.96 alpha:1.0];
         searchBox.layer.cornerRadius = 8;
@@ -280,7 +294,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         searchBox.font = [UIFont systemFontOfSize:14];
         searchBox.returnKeyType = UIReturnKeyDone;
         
-        // 居中模式下，移除多余的左侧占位以保证绝对居中
         [headerContainer addSubview:searchBox];
         
         if (!gSearchHandler) {
@@ -346,9 +359,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-// ==========================================
-// 8. 宏观清洗与底层清洗
-// ==========================================
+
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
     NSArray *originalSections = %orig;
