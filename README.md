@@ -61,10 +61,10 @@ DYPluginMgr 是一个专为抖音 (Douyin) 越狱/注入环境设计的**第三�
         }
     }
 }
-###########################################################################################################
-如果你使用的是传统的类名跳转，中枢同样保留了 registerControllerWithTitle:version:controller: 接口，传参方式同理。
 
-方式二：被动收割（无需写代码，基于原生 Hook）
+##  如果你使用的是传统的类名跳转，中枢同样保留了 registerControllerWithTitle:version:controller: 接口，传参方式同理。
+
+##  方式二：被动收割（无需写代码，基于原生 Hook）
 如果你的插件是通过 Hook AWESettingsViewModel 的 sectionDataArray 将入口直接写入抖音设置页面的，你可以不需要修改一行代码。
 
 你只需要在此仓库提交一个 Pull Request，将你的区块标题（sectionHeaderTitle）加入本项目的 targetPlugins 拦截白名单中即可。
@@ -76,12 +76,13 @@ NSArray *targetPlugins = @[
     @"DYKiller", 
     @"你的插件区块标题" // 在这里加上你的标题
 ];
-📥 用户安装与使用
+
+##  📥 用户安装与使用
 下载最新 Release 中的 .dylib 或 .deb 产物。
 
 随同其他抖音插件一起注入进抖音应用。
 
 打开抖音 -> 设置，即可在最上方看到 🛠️ 插件收纳中枢。
 
-📄 License
+##  📄 License
 本项目基于 MIT 许可证开源。允许自由学习、交流与二次开发。
