@@ -82,7 +82,7 @@ static NSMutableArray *gHarvestedPlugins = nil;
     // 建立总入口
     AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
     entry.identifier = @"DYPluginMgr";
-    entry.title = @"🛠️ 插件收纳中枢";
+    entry.title = @"插件";
     entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)gHarvestedPlugins.count];
     entry.type = 0;
     entry.svgIconImageName = @"ic_gearsimplify_outlined_20";
@@ -97,7 +97,7 @@ static NSMutableArray *gHarvestedPlugins = nil;
         if (strongSelf && strongSelf.controllerDelegate) {
             UIViewController *rootVC = (UIViewController *)strongSelf.controllerDelegate;
             
-            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"🛠️ 插件收纳中枢" 
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"插件" 
                                                                            message:@"请选择要配置的插件" 
                                                                     preferredStyle:UIAlertControllerStyleActionSheet];
             
