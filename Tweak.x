@@ -2,9 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ==========================================
-// 1. 声明抖音原生模型
-// ==========================================
+
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
@@ -34,16 +32,12 @@
 - (id)viewModel;
 @end
 
-// ==========================================
-// 2. 核心状态存储
-// ==========================================
+
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
-// ==========================================
-// 3. 超级精确匹配识别器 & 收割去重
-// ==========================================
+
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
@@ -53,7 +47,6 @@ static BOOL IsTargetPlugin(NSString *title) {
         @"DouyinHelper", @"Yuki"
     ];
     for (NSString *t in targets) {
-        // 💡 修复：已改为精确匹配，防止误杀插件子页面的配置项
         if ([title isEqualToString:t]) {
             return YES;
         }
@@ -68,7 +61,7 @@ static void HarvestItem(id item) {
     NSString *identifier = [item valueForKey:@"identifier"];
     NSString *title = [item valueForKey:@"title"];
     
-    // 严格去重，防止多次进出设置导致重复添加
+   
     for (id existing in gHarvestedPlugins) {
         NSString *exId = [existing valueForKey:@"identifier"];
         NSString *exTitle = [existing valueForKey:@"title"];
@@ -78,34 +71,26 @@ static void HarvestItem(id item) {
         }
     }
     
-    // ==========================================
-    // 💡 核心优化：拦截并重写插件的点击事件回调
-    // 确保在二级页面点击时，能正确传递上下文并安全触发原 Block
-    // ==========================================
     @try {
         void (^originalBlock)(void) = [item valueForKey:@"cellTappedBlock"];
         if (originalBlock) {
             void (^wrappedBlock)(void) = ^{
-                // 可以在此处注入适配逻辑，直接安全调用原插件的触发逻辑
                 originalBlock();
             };
             [item setValue:wrappedBlock forKey:@"cellTappedBlock"];
         }
     } @catch (NSException *exception) {
-        // 防止部分 KVC 异常导致崩溃
     }
     
     [gHarvestedPlugins addObject:item];
 }
 
-// ==========================================
-// 4. 构建并展示原生二级页面
-// ==========================================
+
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        // 替换导航栏标题
+       
         for (UIView *sub in subVC.view.subviews) {
             if ([sub isKindOfClass:NSClassFromString(@"AWENavigationBar")]) {
                 if ([sub respondsToSelector:@selector(titleLabel)]) {
@@ -116,30 +101,43 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             }
         }
         
-        // 💡 新增：仿制原图底部水印样式，添加专属 GitHub 仓库地址
+       
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
-        UILabel *footerLabel = [[UILabel alloc] initWithFrame:CGRectMake(0, screenH - 180, screenW, 120)];
-        footerLabel.numberOfLines = 0;
-        footerLabel.textAlignment = NSTextAlignmentCenter;
-        // 保证其永远吸附在底部
-        footerLabel.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+        UITextView *footerView = [[UITextView alloc] initWithFrame:CGRectMake(0, screenH - 180, screenW, 120)];
+        footerView.backgroundColor = [UIColor clearColor];
+        footerView.editable = NO;     
+        footerView.selectable = YES;   
+        footerView.scrollEnabled = NO;  
+        footerView.textContainerInset = UIEdgeInsetsZero;
+        footerView.textContainer.lineFragmentPadding = 0;
+        footerView.autoresizingMask = UIViewAutoresizingFlexibleTopMargin | UIViewAutoresizingFlexibleWidth;
+        
+     
+        footerView.linkTextAttributes = @{
+            NSForegroundColorAttributeName: [UIColor grayColor],
+            NSUnderlineStyleAttributeName: @(NSUnderlineStyleNone)
+        };
         
         NSMutableAttributedString *footerText = [[NSMutableAttributedString alloc] init];
         
-        // 1. 绿色标题 (仿照原图的绿色)
+  
         NSAttributedString *line1 = [[NSAttributedString alloc] initWithString:@"开源仓库地址\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:14 weight:UIFontWeightMedium], NSForegroundColorAttributeName: [UIColor colorWithRed:0.18 green:0.49 blue:0.36 alpha:1.0]}];
         
-        // 2. 仓库地址 (灰色)
-        NSAttributedString *line2 = [[NSAttributedString alloc] initWithString:@"https://github.com/xlzs001/DYstorage\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12], NSForegroundColorAttributeName: [UIColor grayColor]}];
         
-        // 3. 开发者信息 (灰色)
+        NSAttributedString *line2 = [[NSAttributedString alloc] initWithString:@"https://github.com/xlzs001/DYstorage\n" attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:12],
+            NSForegroundColorAttributeName: [UIColor grayColor],
+            NSLinkAttributeName: @"https://github.com/xlzs001/DYstorage" 
+        }];
+        
+    
         NSAttributedString *line3 = [[NSAttributedString alloc] initWithString:@"Developed by xlzs001\n" attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:12], NSForegroundColorAttributeName: [UIColor grayColor]}];
         
-        // 4. 版权信息 (浅灰)
+  
         NSAttributedString *line4 = [[NSAttributedString alloc] initWithString:@"© 2026 xlzs001. All rights reserved." attributes:@{NSFontAttributeName: [UIFont systemFontOfSize:11], NSForegroundColorAttributeName: [UIColor lightGrayColor]}];
         
-        // 设置行间距
+       
         NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
         paragraphStyle.lineSpacing = 8;
         paragraphStyle.alignment = NSTextAlignmentCenter;
@@ -150,8 +148,8 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         [footerText appendAttributedString:line4];
         [footerText addAttribute:NSParagraphStyleAttributeName value:paragraphStyle range:NSMakeRange(0, footerText.length)];
         
-        footerLabel.attributedText = footerText;
-        [subVC.view addSubview:footerLabel];
+        footerView.attributedText = footerText;
+        [subVC.view addSubview:footerView];
     });
 
     if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
@@ -164,7 +162,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
-    // 关键：将当前二级页面赋给 viewModel 的 controllerDelegate，供插件内部调用 UI 弹窗等方法
     [viewModel setValue:subVC forKey:@"controllerDelegate"];
     
     id section = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
@@ -201,9 +198,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-// ==========================================
-// 5. 第一重清洗：拦截宏观区块
-// ==========================================
+
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
     NSArray *originalSections = %orig;
@@ -275,9 +270,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-// ==========================================
-// 6. 第二重清洗：终极底层拦截
-// ==========================================
+
 %hook AWESettingSectionModel
 - (NSArray *)itemArray {
     NSArray *items = %orig;
