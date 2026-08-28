@@ -39,13 +39,45 @@
 // ==========================================
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
-static id gDummyViewModel = nil; // 【关键修复】：必须强引用保留后台钓鱼的 ViewModel，否则高级插件会因为指针释放而无法跳转！
+static id gDummyViewModel = nil; // 强引用保留后台钓鱼的 ViewModel，防止高级插件指针释放失效
 
 // ==========================================
-// 3. 构建并展示原生二级页面
+// 3. 超级模糊匹配识别器 & 收割去重
+// ==========================================
+static BOOL IsTargetPlugin(NSString *title) {
+    if (!title || title.length == 0) return NO;
+    NSArray *targets = @[
+        @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
+        @"抖音图层", @"抖+", @"抖⁺", @"抖＋", @"aweJ", 
+        @"AwemeX", @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", 
+        @"DouyinHelper", @"Yuki"
+    ];
+    for (NSString *t in targets) {
+        if ([title containsString:t]) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void HarvestItem(id item) {
+    if (!item) return;
+    if (!gHarvestedPlugins) gHarvestedPlugins = [NSMutableArray array];
+    
+    NSString *identifier = [item valueForKey:@"identifier"] ?: [item valueForKey:@"title"];
+    for (id existing in gHarvestedPlugins) {
+        NSString *exId = [existing valueForKey:@"identifier"] ?: [existing valueForKey:@"title"];
+        if ([exId isEqualToString:identifier]) {
+            return; // 防止重复添加
+        }
+    }
+    [gHarvestedPlugins addObject:item];
+}
+
+// ==========================================
+// 4. 构建并展示原生二级页面
 // ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
-    // 实例化我们要弹出的原生设置页面
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
     // 异步修改顶栏标题
@@ -61,17 +93,16 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
     });
 
-    // 【前置钓鱼逻辑】：如果没有数据，在后台触发一次设置页的生成机制
+    // 前置钓鱼逻辑：强制激起插件们的表现欲，并指向新的控制器
     if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
         gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     }
-    // 【关键修复】：将插件依赖的 controllerDelegate 永远指向我们当前活着的 subVC，这样无论从哪里启动都能成功 push 界面
     if (gDummyViewModel) {
         [gDummyViewModel setValue:subVC forKey:@"controllerDelegate"];
         [gDummyViewModel performSelector:@selector(sectionDataArray)];
     }
     
-    // 构建我们自己的二级列表数据
+    // 配置自己的 ViewModel 数据源
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
     
@@ -82,11 +113,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     [section setValue:(gHarvestedPlugins ? [gHarvestedPlugins copy] : @[]) forKey:@"itemArray"];
     
     [viewModel setValue:@[section] forKey:@"sectionDataArray"];
-    
-    // 绑定数据源
     objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
-    // 寻找最顶层控制器并进行跳转
+    // 获取顶层控制器进行跳转
     UIViewController *topVC = rootVC;
     if (!topVC) {
         topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
@@ -105,191 +134,173 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 
 // ==========================================
-// 4. 接管并兼容自定义数据源
+// 5. 双重清洗：拦截 ViewController & ViewModel
 // ==========================================
 %hook AWESettingBaseViewController
+
 - (id)viewModel {
     id orig = %orig;
     if (!orig) return objc_getAssociatedObject(self, kDYPluginViewModelKey);
     return orig;
 }
+
+// 视图将要显示时，进行第二道清洗，铲除生命周期较晚的高级插件
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    
+    id viewModel = [self viewModel];
+    if (!viewModel || ![viewModel respondsToSelector:@selector(sectionDataArray)]) return;
+    
+    NSArray *sections = [viewModel sectionDataArray];
+    BOOL isMainPage = NO;
+    for (id s in sections) {
+        if ([s respondsToSelector:@selector(sectionHeaderTitle)] && [[s valueForKey:@"sectionHeaderTitle"] isEqualToString:@"账号"]) {
+            isMainPage = YES; break;
+        }
+    }
+    if (!isMainPage) return;
+
+    BOOL needReload = NO;
+    NSMutableArray *finalSections = [NSMutableArray array];
+    
+    for (id section in sections) {
+        if (![section respondsToSelector:@selector(sectionHeaderTitle)]) {
+            [finalSections addObject:section];
+            continue;
+        }
+        NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
+        
+        // 实时更新计数值
+        if ([sectionTitle isEqualToString:@"收纳"]) {
+            NSArray *items = [section valueForKey:@"itemArray"];
+            if (items.count > 0) {
+                id entry = items.firstObject;
+                NSString *currentDetail = [entry valueForKey:@"detail"];
+                NSString *newDetail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)(gHarvestedPlugins.count)];
+                if (![currentDetail isEqualToString:newDetail]) {
+                    [entry setValue:newDetail forKey:@"detail"];
+                    needReload = YES;
+                }
+            }
+            [finalSections addObject:section];
+            continue;
+        }
+        
+        if (IsTargetPlugin(sectionTitle)) {
+            NSArray *items = [section valueForKey:@"itemArray"];
+            for (id item in items) HarvestItem(item);
+            needReload = YES; 
+        } else {
+            NSArray *items = [section valueForKey:@"itemArray"];
+            NSMutableArray *cleanItems = [NSMutableArray array];
+            BOOL sectionModified = NO;
+            for (id item in items) {
+                NSString *itemTitle = [item valueForKey:@"title"];
+                if (IsTargetPlugin(itemTitle)) {
+                    HarvestItem(item);
+                    sectionModified = YES;
+                    needReload = YES;
+                } else {
+                    [cleanItems addObject:item];
+                }
+            }
+            if (sectionModified) {
+                [section setValue:cleanItems forKey:@"itemArray"];
+            }
+            if (cleanItems.count > 0 || items.count == 0) {
+                [finalSections addObject:section];
+            }
+        }
+    }
+    
+    if (needReload) {
+        [viewModel setValue:finalSections forKey:@"sectionDataArray"];
+        UITableView *tableView = [self valueForKey:@"tableView"];
+        if ([tableView respondsToSelector:@selector(reloadData)]) {
+            [tableView reloadData];
+        }
+    }
+}
 %end
 
-// ==========================================
-// 5. 数据源透视收割 (完美拦截区块与Item)
-// ==========================================
+// 第一道清洗：数据源层拦截
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
     NSArray *originalSections = %orig;
     if (![originalSections isKindOfClass:[NSArray class]]) return originalSections;
 
-    // 避开自己的二级页面，防止死循环无限收割
+    BOOL isMainPage = NO;
     for (id s in originalSections) {
-        if ([s respondsToSelector:@selector(sectionHeaderTitle)] && [[s valueForKey:@"sectionHeaderTitle"] isEqualToString:@"已收纳的插件"]) {
-            return originalSections;
+        if ([s respondsToSelector:@selector(sectionHeaderTitle)] && [[s valueForKey:@"sectionHeaderTitle"] isEqualToString:@"账号"]) {
+            isMainPage = YES; break;
         }
     }
-
-    if (!gHarvestedPlugins) {
-        gHarvestedPlugins = [NSMutableArray array];
-    }
+    if (!isMainPage) return originalSections;
 
     NSMutableArray *finalSections = [NSMutableArray array];
-    
-    // ⚠️ 收纳目标名单
-    NSArray *targetPlugins = @[
-        @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
-        @"抖音图层", @"抖+", @"aweJ", @"AwemeX",
-        @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", @"DouyinHelper", @"Yuki"
-    ];
+    BOOL hasMgrSection = NO;
     
     for (id section in originalSections) {
         if (![section respondsToSelector:@selector(sectionHeaderTitle)]) {
             [finalSections addObject:section];
             continue;
         }
-        
         NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
-        NSArray *items = [section valueForKey:@"itemArray"];
+        if ([sectionTitle isEqualToString:@"收纳"]) {
+            hasMgrSection = YES;
+            [finalSections addObject:section];
+            continue;
+        }
         
-        // 【情况 A】：整个区块都是插件专属的（如 DYYY）
-        if ([targetPlugins containsObject:sectionTitle] || [sectionTitle isEqualToString:@"收纳"]) {
-            if (items.count > 0) {
-                for (id item in items) {
-                    BOOL exists = NO;
-                    NSString *identifier = [item valueForKey:@"identifier"];
-                    for (id existing in gHarvestedPlugins) {
-                        if ([[existing valueForKey:@"identifier"] isEqualToString:identifier]) { exists = YES; break; }
-                    }
-                    if (!exists) [gHarvestedPlugins addObject:item];
-                }
-            }
+        if (IsTargetPlugin(sectionTitle)) {
+            NSArray *items = [section valueForKey:@"itemArray"];
+            for (id item in items) HarvestItem(item);
         } else {
-            // 【情况 B】：插件像寄生虫一样藏在原生区块内部（如 抖音图层、抖+ 藏在"通用"里）
-            NSMutableArray *filteredItems = [NSMutableArray array];
+            NSArray *items = [section valueForKey:@"itemArray"];
+            NSMutableArray *cleanItems = [NSMutableArray array];
             for (id item in items) {
                 NSString *itemTitle = [item valueForKey:@"title"];
-                // 透视扫描内部的每一个选项
-                if ([targetPlugins containsObject:itemTitle]) {
-                    BOOL exists = NO;
-                    NSString *identifier = [item valueForKey:@"identifier"];
-                    for (id existing in gHarvestedPlugins) {
-                        if ([[existing valueForKey:@"identifier"] isEqualToString:identifier]) { exists = YES; break; }
-                    }
-                    if (!exists) [gHarvestedPlugins addObject:item];
+                if (IsTargetPlugin(itemTitle)) {
+                    HarvestItem(item);
                 } else {
-                    [filteredItems addObject:item]; // 不是插件的选项，还给抖音原生列表
+                    [cleanItems addObject:item];
                 }
             }
-            [section setValue:filteredItems forKey:@"itemArray"];
-            if (filteredItems.count > 0 || items.count == 0) {
+            [section setValue:cleanItems forKey:@"itemArray"];
+            if (cleanItems.count > 0 || items.count == 0) {
                 [finalSections addObject:section];
             }
         }
     }
 
-    // 检查是否在设置主页（我们只在主页注入唯一入口）
-    BOOL isMainPage = NO;
-    for (id s in finalSections) {
-        NSString *title = [s valueForKey:@"sectionHeaderTitle"];
-        if ([title isEqualToString:@"账号"] || [title isEqualToString:@"关于抖音"]) {
-            isMainPage = YES;
-            break;
-        }
-    }
-
-    if (isMainPage) {
+    if (!hasMgrSection) {
         AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
         entry.identifier = @"DYPluginMgr";
         entry.title = @"收纳"; 
-        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)gHarvestedPlugins.count];
+        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)(gHarvestedPlugins.count)];
         entry.type = 0;
         entry.svgIconImageName = @"ic_gearsimplify_outlined_20";
         entry.cellType = 26; 
         entry.colorStyle = 0;
         entry.isEnable = YES;
 
-        __weak AWESettingsViewModel *weakSelf = self;
+        __weak typeof(self) weakSelf = self;
         entry.cellTappedBlock = ^{
-            __strong AWESettingsViewModel *strongSelf = weakSelf;
+            __strong typeof(weakSelf) strongSelf = weakSelf;
             if (strongSelf && strongSelf.controllerDelegate) {
                 ShowPluginManagerPage((UIViewController *)strongSelf.controllerDelegate);
             }
         };
 
-        AWESettingSectionModel *mgrSection = [[%c(AWESettingSectionModel) alloc] init];
-        mgrSection.itemArray = @[ entry ];
-        mgrSection.type = 0;
-        mgrSection.sectionHeaderHeight = 40;
-        mgrSection.sectionHeaderTitle = @"收纳"; 
+        id mgrSection = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
+        [mgrSection setValue:@[ entry ] forKey:@"itemArray"];
+        [mgrSection setValue:@(0) forKey:@"type"];
+        [mgrSection setValue:@(40) forKey:@"sectionHeaderHeight"];
+        [mgrSection setValue:@"收纳" forKey:@"sectionHeaderTitle"];
+
         [finalSections insertObject:mgrSection atIndex:0];
     }
     
     return finalSections;
 }
-%end
-
-// ==========================================
-// 6. 强穿透手势识别代理 (解决手势被点赞吃掉的问题)
-// ==========================================
-@interface DYPluginGestureDelegate : NSObject <UIGestureRecognizerDelegate>
-+ (instancetype)sharedInstance;
-@end
-
-@implementation DYPluginGestureDelegate
-+ (instancetype)sharedInstance {
-    static DYPluginGestureDelegate *instance = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        instance = [[self alloc] init];
-    });
-    return instance;
-}
-// 【绝对核心】：强制允许我们的三连击手势与抖音自带的滑动、点赞等手势同时触发！
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
-}
-@end
-
-// ==========================================
-// 7. 挂载全局手势唤出
-// ==========================================
-%hook UIWindow
-
-- (void)becomeKeyWindow {
-    %orig;
-    
-    BOOL hasGesture = NO;
-    for (UIGestureRecognizer *g in self.gestureRecognizers) {
-        if ([g isKindOfClass:[UITapGestureRecognizer class]] && ((UITapGestureRecognizer *)g).numberOfTapsRequired == 3) {
-            hasGesture = YES;
-            break;
-        }
-    }
-    
-    if (!hasGesture) {
-        UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dyplugin_tap:)];
-        tap.numberOfTapsRequired = 3; 
-        
-        // 绑定强穿透代理
-        tap.delegate = [DYPluginGestureDelegate sharedInstance]; 
-        // 禁止吃掉触摸事件，保证抖音本身的逻辑正常运转
-        tap.cancelsTouchesInView = NO; 
-        tap.delaysTouchesEnded = NO;
-        
-        [self addGestureRecognizer:tap];
-    }
-}
-
-%new
-- (void)dyplugin_tap:(UITapGestureRecognizer *)sender {
-    if (sender.state == UIGestureRecognizerStateRecognized) {
-        UIViewController *topVC = self.rootViewController;
-        while (topVC.presentedViewController) {
-            topVC = topVC.presentedViewController;
-        }
-        ShowPluginManagerPage(topVC);
-    }
-}
-
 %end
