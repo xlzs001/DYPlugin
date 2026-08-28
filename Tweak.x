@@ -142,9 +142,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     repoItem.colorStyle = 0;
     repoItem.isEnable = YES;
     
-    __weak typeof(repoItem) weakRepoItem = repoItem;
     repoItem.cellTappedBlock = ^{
-        __strong typeof(weakRepoItem) strongRepoItem = weakRepoItem;
         NSURL *url = [NSURL URLWithString:@"https://github.com/xlzs001/DYstorage"];
         if (url) {
             if (@available(iOS 10.0, *)) {
