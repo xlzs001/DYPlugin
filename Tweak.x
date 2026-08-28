@@ -62,6 +62,11 @@ static NSMutableArray *gHarvestedPlugins = nil;
         @"自动消息",
         @"抖音图层",
         @"抖+",
+        @"aweJ",
+        @"AwemeX",
+        @"SJJAwemeLoginRepair",
+        @"𝙓𝙐𝙐ᶻ",
+        @"DouyinHelper",
         @"Yuki"// ← 以后有新插件，直接在这里加一行名字！
     ];
     
