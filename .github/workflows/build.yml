@@ -44,17 +44,17 @@ jobs:
 
       - name: Rename Package with Version
         run: |
-          # 1. 从 control 文件中读取 Version 字段（例如 1.0.0）
+        
           VERSION=$(grep '^Version:' control | awk '{print $2}')
           echo "检测到当前版本号: $VERSION"
           
-          # 2. 创建一个新目录存放重命名后的文件
+        
           mkdir -p output_packages
           
-          # 3. 将原生成的 deb 文件重命名并复制过去（例如 DYPluginMgr_1.0.0.deb）
+        
           for file in packages/*.deb; do
             filename=$(basename "$file")
-            # 去掉原文件名最后的 .deb，加上版本号再拼回去
+         
             newname="${filename%.deb}_${VERSION}.deb"
             cp "$file" "output_packages/$newname"
             echo "已重命名为: $newname"
