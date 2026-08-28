@@ -37,14 +37,15 @@
 // ==========================================
 // 2. 核心状态存储
 // ==========================================
-static NSMutableArray *gHarvestedPlugins = nil;
+// 改为存储整个 section 或者独立封装，保证插件各自的完整性
+static NSMutableArray *gHarvestedSections = nil; 
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
 // ==========================================
-// 3. 超级模糊匹配识别器 & 收割去重
+// 3. 超级模糊匹配识别器
 // ==========================================
-static BOOL IsTargetPlugin(NSString *title) {
+static BOOL IsTargetPluginTitle(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
         @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
@@ -60,45 +61,46 @@ static BOOL IsTargetPlugin(NSString *title) {
     return NO;
 }
 
-static void HarvestItem(id item) {
-    if (!item) return;
-    if (!gHarvestedPlugins) gHarvestedPlugins = [NSMutableArray array];
+// 检查某个 Section 是否属于插件独立区块
+static BOOL IsPluginSection(id section) {
+    if (![section respondsToSelector:@selector(sectionHeaderTitle)]) return NO;
+    NSString *headerTitle = [section valueForKey:@"sectionHeaderTitle"];
+    if (IsTargetPluginTitle(headerTitle)) {
+        return YES;
+    }
     
-    NSString *identifier = [item valueForKey:@"identifier"];
-    NSString *title = [item valueForKey:@"title"];
+    // 检查内部 item 有没有匹配的
+    if ([section respondsToSelector:@selector(itemArray)]) {
+        NSArray *items = [section valueForKey:@"itemArray"];
+        for (id item in items) {
+            NSString *itemTitle = [item valueForKey:@"title"];
+            if (IsTargetPluginTitle(itemTitle)) {
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
+static void HarvestSection(id section) {
+    if (!section) return;
+    if (!gHarvestedSections) gHarvestedSections = [NSMutableArray array];
     
-    // 严格去重，防止多次进出设置导致重复添加
-    for (id existing in gHarvestedPlugins) {
-        NSString *exId = [existing valueForKey:@"identifier"];
-        NSString *exTitle = [existing valueForKey:@"title"];
-        if ((identifier && exId && [exId isEqualToString:identifier]) || 
-            (title && exTitle && [exTitle isEqualToString:title])) {
-            return; 
+    NSString *secTitle = [section respondsToSelector:@selector(sectionHeaderTitle)] ? [section valueForKey:@"sectionHeaderTitle"] : nil;
+    
+    // 去重
+    for (id existing in gHarvestedSections) {
+        NSString *exTitle = [existing respondsToSelector:@selector(sectionHeaderTitle)] ? [existing valueForKey:@"sectionHeaderTitle"] : nil;
+        if (secTitle && exTitle && [secTitle isEqualToString:exTitle]) {
+            return;
         }
     }
     
-    // ==========================================
-    // 💡 核心优化：拦截并重写插件的点击事件回调
-    // 确保在二级页面点击时，能正确传递上下文并安全触发原 Block
-    // ==========================================
-    @try {
-        void (^originalBlock)(void) = [item valueForKey:@"cellTappedBlock"];
-        if (originalBlock) {
-            void (^wrappedBlock)(void) = ^{
-                // 可以在此处注入适配逻辑，直接安全调用原插件的触发逻辑
-                originalBlock();
-            };
-            [item setValue:wrappedBlock forKey:@"cellTappedBlock"];
-        }
-    } @catch (NSException *exception) {
-        // 防止部分 KVC 异常导致崩溃
-    }
-    
-    [gHarvestedPlugins addObject:item];
+    [gHarvestedSections addObject:section];
 }
 
 // ==========================================
-// 4. 构建并展示原生二级页面
+// 4. 构建并展示原生二级页面（支持多个Section，完美保留每个插件自己的子菜单）
 // ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
@@ -115,7 +117,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
     });
 
-    if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
+    if (!gHarvestedSections || gHarvestedSections.count == 0) {
         gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     }
     if (gDummyViewModel) {
@@ -125,16 +127,47 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
-    // 关键：将当前二级页面赋给 viewModel 的 controllerDelegate，供插件内部调用 UI 弹窗等方法
     [viewModel setValue:subVC forKey:@"controllerDelegate"];
     
-    id section = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
-    [section setValue:@"已收纳的插件" forKey:@"sectionHeaderTitle"];
-    [section setValue:@(40) forKey:@"sectionHeaderHeight"];
-    [section setValue:@(0) forKey:@"type"];
-    [section setValue:(gHarvestedPlugins ? [gHarvestedPlugins copy] : @[]) forKey:@"itemArray"];
+    NSMutableArray *finalSectionArray = [NSMutableArray array];
     
-    [viewModel setValue:@[section] forKey:@"sectionDataArray"];
+    // 把收割到的所有插件 Section 放进来
+    if (gHarvestedSections) {
+        [finalSectionArray addObjectsFromArray:gHarvestedSections];
+    }
+    
+    // 额外在最底部追加一个“仓库地址”的分区
+    NSMutableArray *repoItems = [NSMutableArray array];
+    AWESettingItemModel *repoItem = [[%c(AWESettingItemModel) alloc] init];
+    repoItem.identifier = @"DYPluginRepoAddress";
+    repoItem.title = @"https://github.com/xlzs001/DYstorage";
+    repoItem.detail = @"GitHub";
+    repoItem.type = 0;
+    repoItem.svgIconImageName = @"ic_link_outlined_20";
+    repoItem.cellType = 26; 
+    repoItem.colorStyle = 0;
+    repoItem.isEnable = YES;
+    repoItem.cellTappedBlock = ^{
+        NSURL *url = [NSURL URLWithString:@"https://github.com/xlzs001/DYstorage]; // 请改成你的仓库地址
+        if (url) {
+            if (@available(iOS 10.0, *)) {
+                [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+            } else {
+                [[UIApplication sharedApplication] openURL:url];
+            }
+        }
+    };
+    [repoItems addObject:repoItem];
+
+    id repoSection = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
+    [repoSection setValue:@"关于项目" forKey:@"sectionHeaderTitle"];
+    [repoSection setValue:@(40) forKey:@"sectionHeaderHeight"];
+    [repoSection setValue:@(0) forKey:@"type"];
+    [repoSection setValue:repoItems forKey:@"itemArray"];
+    
+    [finalSectionArray addObject:repoSection];
+
+    [viewModel setValue:finalSectionArray forKey:@"sectionDataArray"];
     objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
     UIViewController *topVC = rootVC;
@@ -163,7 +196,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 %end
 
 // ==========================================
-// 5. 第一重清洗：拦截宏观区块
+// 5. 第一重清洗：拦截主页区块，把插件整块收割
 // ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
@@ -195,9 +228,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             continue;
         }
         
-        if (IsTargetPlugin(sectionTitle)) {
-            NSArray *items = [section valueForKey:@"itemArray"];
-            for (id item in items) HarvestItem(item);
+        // 如果整个区块属于插件，直接收割整块 Section，不在主页显示
+        if (IsPluginSection(section)) {
+            HarvestSection(section);
             continue; 
         }
         
@@ -208,7 +241,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
         entry.identifier = @"DYPluginMgr";
         entry.title = @"收纳"; 
-        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个", (unsigned long)(gHarvestedPlugins.count)];
+        entry.detail = [NSString stringWithFormat:@"已收纳 %lu 个插件", (unsigned long)(gHarvestedSections.count)];
         entry.type = 0;
         entry.svgIconImageName = @"ic_gearsimplify_outlined_20";
         entry.cellType = 26; 
@@ -237,7 +270,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 %end
 
 // ==========================================
-// 6. 第二重清洗：终极底层拦截
+// 6. 第二重清洗：防止漏网之鱼
 // ==========================================
 %hook AWESettingSectionModel
 - (NSArray *)itemArray {
@@ -249,30 +282,22 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         headerTitle = [self valueForKey:@"sectionHeaderTitle"];
     }
     
-    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"]) {
+    // 如果是我们的收纳页面，绝对放行
+    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"] || [headerTitle isEqualToString:@"关于项目"]) {
         return items;
     }
     
-    BOOL hasPlugin = NO;
-    for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            hasPlugin = YES; 
-            break;
-        }
-    }
-    
-    if (!hasPlugin) return items;
-    
+    // 主页过滤单个散落的插件项
     NSMutableArray *cleanItems = [NSMutableArray array];
     for (id item in items) {
         NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            HarvestItem(item); 
+        if (IsTargetPluginTitle(itemTitle)) {
+            // 单独项不破坏
+            [cleanItems addObject:item];
         } else {
-            [cleanItems addObject:item]; 
+            [cleanItems addObject:item];
         }
     }
-    return cleanItems; 
+    return cleanItems;
 }
 %end
