@@ -170,10 +170,10 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     [viewModel setValue:@[section] forKey:@"sectionDataArray"];
     
     // 💡 关键标记：给这个页面打上属于我们的烙印
-    objc_setAssociatedObject(subVC, kkDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    
-    UIViewController *topVC = rootVC;
-    if (!topVC) {
+ 
+    objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    UIViewController *topVC = rootVC;                  
+    if (!topVC) { 
         topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     }
     while (topVC.presentedViewController) {
