@@ -11,10 +11,13 @@
 @property (nonatomic, copy) NSString *detail;
 @property (nonatomic, assign) NSInteger type;
 @property (nonatomic, copy) NSString *svgIconImageName;
+@property (nonatomic, copy) NSString *iconImageName;
 @property (nonatomic, assign) NSInteger cellType;
 @property (nonatomic, assign) NSInteger colorStyle;
 @property (nonatomic, assign) BOOL isEnable;
+@property (nonatomic, assign) BOOL isSwitchOn;
 @property (nonatomic, copy) void (^cellTappedBlock)(void);
+@property (nonatomic, copy) void (^switchChangedBlock)(void);
 @end
 
 @interface AWESettingSectionModel : NSObject
@@ -26,8 +29,6 @@
 
 @interface AWESettingsViewModel : NSObject
 @property (nonatomic, weak) id controllerDelegate;
-@property (nonatomic, strong) NSArray *sectionDataArray;
-@property (nonatomic, assign) NSInteger colorStyle;
 @end
 
 @interface AWESettingBaseViewController : UIViewController
@@ -39,14 +40,13 @@
 // ==========================================
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
-static id gDummyViewModel = nil; 
 
 // ==========================================
-// 3. 超级模糊匹配识别器 & 收割去重
+// 3. 超级模糊匹配识别器 & 安全收割
 // ==========================================
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
-    // ⚠️ 你的白名单保留不变，增加了对“抖+”上标符号的模糊匹配防漏
+    // 加入了所有可能出现的插件名以及特殊符号（如抖⁺的各种变体）
     NSArray *targets = @[
         @"DYYY", @"DYKiller", @"抖音助手", @"自动消息",
         @"抖音图层", @"抖+", @"抖⁺", @"抖＋", @"aweJ", 
@@ -62,18 +62,15 @@ static BOOL IsTargetPlugin(NSString *title) {
 }
 
 static void HarvestItem(id item) {
-    if (!item) return;
+    if (!item || ![item isKindOfClass:NSClassFromString(@"AWESettingItemModel")]) return;
     if (!gHarvestedPlugins) gHarvestedPlugins = [NSMutableArray array];
     
-    NSString *identifier = [item valueForKey:@"identifier"];
-    NSString *title = [item valueForKey:@"title"];
+    NSString *title = [item respondsToSelector:@selector(title)] ? [item valueForKey:@"title"] : nil;
     
-    // 严格去重，防止多次进出设置导致重复添加
+    // 严格按标题去重，防止重复抓取
     for (id existing in gHarvestedPlugins) {
-        NSString *exId = [existing valueForKey:@"identifier"];
         NSString *exTitle = [existing valueForKey:@"title"];
-        if ((identifier && exId && [exId isEqualToString:identifier]) || 
-            (title && exTitle && [exTitle isEqualToString:title])) {
+        if (title && exTitle && [exTitle isEqualToString:title]) {
             return; 
         }
     }
@@ -81,11 +78,12 @@ static void HarvestItem(id item) {
 }
 
 // ==========================================
-// 4. 构建并展示原生二级页面
+// 4. 构建并展示原生二级页面 (利用替身技术修复死链)
 // ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
+    // 异步修改顶栏标题
     dispatch_async(dispatch_get_main_queue(), ^{
         for (UIView *sub in subVC.view.subviews) {
             if ([sub isKindOfClass:NSClassFromString(@"AWENavigationBar")]) {
@@ -98,14 +96,49 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
     });
 
-    if (!gHarvestedPlugins || gHarvestedPlugins.count == 0) {
-        gDummyViewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
-    }
-    if (gDummyViewModel) {
-        [gDummyViewModel setValue:subVC forKey:@"controllerDelegate"];
-        [gDummyViewModel performSelector:@selector(sectionDataArray)];
+    // 核心逻辑：为收割来的插件创建“替身(Wrapper)”，解决上下文丢失导致打不开的 Bug
+    NSMutableArray *wrapperItems = [NSMutableArray array];
+    for (id originalItem in gHarvestedPlugins) {
+        id wrapperItem = [[NSClassFromString(@"AWESettingItemModel") alloc] init];
+        
+        // 安全拷贝 UI 属性
+        NSArray *properties = @[@"identifier", @"title", @"detail", @"type", @"svgIconImageName", @"iconImageName", @"cellType", @"colorStyle", @"isEnable", @"isSwitchOn"];
+        for (NSString *prop in properties) {
+            if ([originalItem respondsToSelector:NSSelectorFromString(prop)]) {
+                id val = [originalItem valueForKey:prop];
+                if (val) [wrapperItem setValue:val forKey:prop];
+            }
+        }
+        
+        // 替身劫持：接管点击事件
+        void (^originalBlock)(void) = [originalItem respondsToSelector:@selector(cellTappedBlock)] ? [originalItem valueForKey:@"cellTappedBlock"] : nil;
+        __weak UIViewController *weakSubVC = subVC;
+        
+        if (originalBlock) {
+            void (^newBlock)(void) = ^{
+                // 1. 瞬间退回到抖音主设置页面（无动画，用户无感）
+                if (weakSubVC.navigationController) {
+                    [weakSubVC.navigationController popViewControllerAnimated:NO];
+                }
+                
+                // 2. 延迟 0.05 秒，在主页面环境完全恢复后，触发插件的真实跳转代码！
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    originalBlock();
+                });
+            };
+            [wrapperItem setValue:newBlock forKey:@"cellTappedBlock"];
+        }
+        
+        // 如果插件带有开关，同样接管
+        void (^origSwitchBlock)(void) = [originalItem respondsToSelector:@selector(switchChangedBlock)] ? [originalItem valueForKey:@"switchChangedBlock"] : nil;
+        if (origSwitchBlock) {
+            [wrapperItem setValue:origSwitchBlock forKey:@"switchChangedBlock"];
+        }
+        
+        [wrapperItems addObject:wrapperItem];
     }
     
+    // 配置自己的 ViewModel 数据源
     id viewModel = [[NSClassFromString(@"AWESettingsViewModel") alloc] init];
     [viewModel setValue:@(0) forKey:@"colorStyle"];
     
@@ -113,11 +146,12 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     [section setValue:@"已收纳的插件" forKey:@"sectionHeaderTitle"];
     [section setValue:@(40) forKey:@"sectionHeaderHeight"];
     [section setValue:@(0) forKey:@"type"];
-    [section setValue:(gHarvestedPlugins ? [gHarvestedPlugins copy] : @[]) forKey:@"itemArray"];
+    [section setValue:wrapperItems forKey:@"itemArray"]; // 放入替身
     
     [viewModel setValue:@[section] forKey:@"sectionDataArray"];
     objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     
+    // 执行跳转
     UIViewController *topVC = rootVC;
     if (!topVC) {
         topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
@@ -135,6 +169,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
+// ==========================================
+// 5. 接管并兼容我们自定义的 ViewModel
+// ==========================================
 %hook AWESettingBaseViewController
 - (id)viewModel {
     id orig = %orig;
@@ -143,9 +180,8 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-
 // ==========================================
-// 5. 第一重清洗：拦截宏观区块 (拦截 DYYY 这类独立成块的插件)
+// 6. 安全拦截清洗 (修复崩溃与漏网之鱼)
 // ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
@@ -159,17 +195,19 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         }
     }
     
+    // 绝对不清洗其他子页面，防止死循环或崩溃
     if (!isMainPage) return originalSections;
 
     NSMutableArray *finalSections = [NSMutableArray array];
     BOOL hasMgrSection = NO;
     
     for (id section in originalSections) {
-        if (![section respondsToSelector:@selector(sectionHeaderTitle)]) {
+        if (![section isKindOfClass:NSClassFromString(@"AWESettingSectionModel")]) {
             [finalSections addObject:section];
             continue;
         }
-        NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
+        
+        NSString *sectionTitle = [section respondsToSelector:@selector(sectionHeaderTitle)] ? [section valueForKey:@"sectionHeaderTitle"] : nil;
         
         if ([sectionTitle isEqualToString:@"收纳"]) {
             hasMgrSection = YES;
@@ -177,16 +215,42 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             continue;
         }
         
-        // 如果整个区块都是插件专属的，直接收割并从主页抹除
+        // 场景 A：整个区块都是插件专属的（如 DYYY）
         if (IsTargetPlugin(sectionTitle)) {
-            NSArray *items = [section valueForKey:@"itemArray"];
-            for (id item in items) HarvestItem(item);
+            NSArray *items = [section respondsToSelector:@selector(itemArray)] ? [section valueForKey:@"itemArray"] : nil;
+            if ([items isKindOfClass:[NSArray class]]) {
+                for (id item in items) HarvestItem(item);
+            }
+            // 不加入 finalSections，即从主页抹除
             continue; 
+        } 
+        // 场景 B：原生区块（如“通用”），开启透视扫描，把“抖+”和“抖音图层”挖出来
+        else {
+            NSArray *items = [section respondsToSelector:@selector(itemArray)] ? [section valueForKey:@"itemArray"] : nil;
+            if ([items isKindOfClass:[NSArray class]]) {
+                NSMutableArray *cleanItems = [NSMutableArray array];
+                BOOL sectionModified = NO;
+                
+                for (id item in items) {
+                    if ([item isKindOfClass:NSClassFromString(@"AWESettingItemModel")]) {
+                        NSString *itemTitle = [item respondsToSelector:@selector(title)] ? [item valueForKey:@"title"] : nil;
+                        if (IsTargetPlugin(itemTitle)) {
+                            HarvestItem(item);
+                            sectionModified = YES;
+                            continue; // 屏蔽此选项
+                        }
+                    }
+                    [cleanItems addObject:item]; // 不是插件的选项还给原生
+                }
+                if (sectionModified) {
+                    [section setValue:cleanItems forKey:@"itemArray"];
+                }
+            }
+            [finalSections addObject:section];
         }
-        
-        [finalSections addObject:section];
     }
 
+    // 7. 在第一行插入我们的【收纳】入口
     if (!hasMgrSection) {
         AWESettingItemModel *entry = [[%c(AWESettingItemModel) alloc] init];
         entry.identifier = @"DYPluginMgr";
@@ -216,51 +280,5 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
     
     return finalSections;
-}
-%end
-
-// ==========================================
-// 6. 第二重清洗：终极底层拦截 (专杀隐藏在原生区块里的“抖+”与“图层”)
-// ==========================================
-%hook AWESettingSectionModel
-
-// 拦截底层属性 Getter，无论它们什么时候注入，只要列表刷新读取数据，就强行剔除！
-- (NSArray *)itemArray {
-    NSArray *items = %orig;
-    if (![items isKindOfClass:[NSArray class]] || items.count == 0) return items;
-
-    NSString *headerTitle = nil;
-    if ([self respondsToSelector:@selector(sectionHeaderTitle)]) {
-        headerTitle = [self valueForKey:@"sectionHeaderTitle"];
-    }
-    
-    // 如果是我们自己的“收纳”页面里的列表，绝对放行，防止把我们自己的列表也清空了
-    if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"]) {
-        return items;
-    }
-    
-    BOOL hasPlugin = NO;
-    for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            hasPlugin = YES; 
-            break;
-        }
-    }
-    
-    // 如果这个原生区块里没混入插件，原样返回，提升性能
-    if (!hasPlugin) return items;
-    
-    // 如果发现了隐藏的插件，进行外科手术级别的剔除
-    NSMutableArray *cleanItems = [NSMutableArray array];
-    for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPlugin(itemTitle)) {
-            HarvestItem(item); // 强行收割！
-        } else {
-            [cleanItems addObject:item]; // 原生设置保留
-        }
-    }
-    return cleanItems; // 把切除了插件的干净列表还给抖音原生界面
 }
 %end
