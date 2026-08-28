@@ -2,7 +2,9 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-
+// ==========================================
+// 1. 声明抖音原生模型
+// ==========================================
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
@@ -32,12 +34,45 @@
 - (id)viewModel;
 @end
 
-
+// ==========================================
+// 2. 核心状态存储
+// ==========================================
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
+// ==========================================
+// 3. 递归查杀流氓水印 (深层扫描)
+// ==========================================
+static void RemoveRogueWatermarks(UIView *view) {
+    if (!view) return;
+    
+    // 检查 UILabel
+    if ([view isKindOfClass:[UILabel class]]) {
+        UILabel *lbl = (UILabel *)view;
+        if ([lbl.text localizedCaseInsensitiveContainsString:@"XUU"]) {
+            lbl.hidden = YES;
+            [lbl removeFromSuperview];
+        }
+    }
+    // 检查 UIButton (以防万一它是按钮)
+    else if ([view isKindOfClass:[UIButton class]]) {
+        UIButton *btn = (UIButton *)view;
+        if ([btn.currentTitle localizedCaseInsensitiveContainsString:@"XUU"]) {
+            btn.hidden = YES;
+            [btn removeFromSuperview];
+        }
+    }
+    
+    // 递归遍历所有子视图
+    for (UIView *subview in view.subviews) {
+        RemoveRogueWatermarks(subview);
+    }
+}
 
+// ==========================================
+// 4. 搜索处理中心
+// ==========================================
 @interface DYPluginSearchHandler : NSObject
 @property (nonatomic, weak) UIViewController *targetVC;
 @property (nonatomic, weak) id viewModel;
@@ -85,7 +120,9 @@ static id gDummyViewModel = nil;
 
 static DYPluginSearchHandler *gSearchHandler = nil;
 
-
+// ==========================================
+// 5. 精确匹配 & 僵尸上下文去重
+// ==========================================
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
@@ -109,13 +146,19 @@ static void HarvestItem(id item) {
     NSString *identifier = [item valueForKey:@"identifier"];
     NSString *title = [item valueForKey:@"title"];
     
+    id staleItem = nil;
     for (id existing in gHarvestedPlugins) {
         NSString *exId = [existing valueForKey:@"identifier"];
         NSString *exTitle = [existing valueForKey:@"title"];
         if ((identifier && exId && [exId isEqualToString:identifier]) || 
             (title && exTitle && [exTitle isEqualToString:title])) {
-            return; 
+            staleItem = existing;
+            break; 
         }
+    }
+    
+    if (staleItem) {
+        [gHarvestedPlugins removeObject:staleItem];
     }
     
     @try {
@@ -131,7 +174,9 @@ static void HarvestItem(id item) {
     [gHarvestedPlugins addObject:item];
 }
 
-
+// ==========================================
+// 6. 构建并跳转二级页面
+// ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
@@ -174,12 +219,29 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
-
+// ==========================================
+// 7. 视图拦截：强制查杀水印、搜索栏与底部版权
+// ==========================================
 %hook AWESettingBaseViewController
 - (id)viewModel {
     id orig = %orig;
     if (!orig) return objc_getAssociatedObject(self, kDYPluginViewModelKey);
     return orig;
+}
+
+// 💡 新增：在页面生命周期的不同阶段强制清理水印，防遗漏
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
+        RemoveRogueWatermarks(self.view);
+    }
+}
+
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (objc_getAssociatedObject(self, kDYPluginViewModelKey)) {
+        RemoveRogueWatermarks(self.view);
+    }
 }
 
 - (void)viewDidLoad {
@@ -190,17 +252,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
         
-      
-        for (UIView *sub in self.view.subviews) {
-            if ([sub isKindOfClass:[UILabel class]]) {
-                UILabel *lbl = (UILabel *)sub;
-                if ([lbl.text localizedCaseInsensitiveContainsString:@"XUU"]) {
-                    [lbl removeFromSuperview];
-                }
-            }
-        }
+        // 初次清理水印
+        RemoveRogueWatermarks(self.view);
         
-     
         CGFloat navBottomY = 88.0; 
         for (UIView *sub in self.view.subviews) {
             if ([sub isKindOfClass:NSClassFromString(@"AWENavigationBar")]) {
@@ -212,12 +266,13 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             }
         }
         
-     
         UIView *headerContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, screenW, 56)];
         headerContainer.backgroundColor = [UIColor clearColor];
         
         UITextField *searchBox = [[UITextField alloc] initWithFrame:CGRectMake(16, 10, screenW - 32, 36)];
-        searchBox.placeholder = @"🔍 怎么能够做到全局搜索啊"; // <-- 在这里！
+        searchBox.placeholder = @"🔍 怎么能够做到全局搜索啊";
+        // 💡 修复：设置文字居中
+        searchBox.textAlignment = NSTextAlignmentCenter; 
         searchBox.backgroundColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.96 alpha:1.0];
         searchBox.layer.cornerRadius = 8;
         searchBox.clipsToBounds = YES;
@@ -225,10 +280,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         searchBox.font = [UIFont systemFontOfSize:14];
         searchBox.returnKeyType = UIReturnKeyDone;
         
-        UIView *leftPadding = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 36)];
-        searchBox.leftView = leftPadding;
-        searchBox.leftViewMode = UITextFieldViewModeAlways;
-        
+        // 居中模式下，移除多余的左侧占位以保证绝对居中
         [headerContainer addSubview:searchBox];
         
         if (!gSearchHandler) {
@@ -239,7 +291,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         
         [searchBox addTarget:gSearchHandler action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
         
-     
         BOOL injectedAsHeader = NO;
         for (UIView *v in self.view.subviews) {
             if ([v isKindOfClass:[UITableView class]]) {
@@ -263,7 +314,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
                 }
             }
         }
-
 
         UITextView *footerView = [[UITextView alloc] initWithFrame:CGRectMake(0, screenH - 180, screenW, 120)];
         footerView.backgroundColor = [UIColor clearColor];
@@ -296,7 +346,9 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-
+// ==========================================
+// 8. 宏观清洗与底层清洗
+// ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
     NSArray *originalSections = %orig;
