@@ -2,9 +2,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
-// ==========================================
-// 1. 声明抖音原生模型
-// ==========================================
+
 @interface AWESettingItemModel : NSObject
 @property (nonatomic, copy) NSString *identifier;
 @property (nonatomic, copy) NSString *title;
@@ -34,16 +32,12 @@
 - (id)viewModel;
 @end
 
-// ==========================================
-// 2. 核心状态存储
-// ==========================================
+
 static NSMutableArray *gHarvestedPlugins = nil;
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
 
-// ==========================================
-// 3. 搜索处理中心 (💡新增：处理搜索框输入事件和列表刷新)
-// ==========================================
+
 @interface DYPluginSearchHandler : NSObject
 @property (nonatomic, weak) UIViewController *targetVC;
 @property (nonatomic, weak) id viewModel;
@@ -54,14 +48,12 @@ static id gDummyViewModel = nil;
     NSString *searchText = textField.text ?: @"";
     NSArray *filteredItems = nil;
     
-    // 如果没有输入，展示全部；否则进行模糊匹配搜索插件名称
     if (searchText.length == 0) {
         filteredItems = [gHarvestedPlugins copy];
     } else {
         NSMutableArray *temp = [NSMutableArray array];
         for (id item in gHarvestedPlugins) {
             NSString *title = [item valueForKey:@"title"];
-            // localizedCaseInsensitiveContainsString 忽略大小写
             if ([title localizedCaseInsensitiveContainsString:searchText]) {
                 [temp addObject:item];
             }
@@ -69,7 +61,6 @@ static id gDummyViewModel = nil;
         filteredItems = temp;
     }
 
-    // 重新构建模型并覆盖
     id section = [[NSClassFromString(@"AWESettingSectionModel") alloc] init];
     [section setValue:@"已收纳的插件" forKey:@"sectionHeaderTitle"];
     [section setValue:@(40) forKey:@"sectionHeaderHeight"];
@@ -78,7 +69,6 @@ static id gDummyViewModel = nil;
     
     [self.viewModel setValue:@[section] forKey:@"sectionDataArray"];
 
-    // 自动寻找底层的 TableView 或 CollectionView 触发刷新
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.targetVC) {
             for (UIView *v in self.targetVC.view.subviews) {
@@ -95,9 +85,7 @@ static id gDummyViewModel = nil;
 
 static DYPluginSearchHandler *gSearchHandler = nil;
 
-// ==========================================
-// 4. 超级精确匹配识别器 & 收割去重
-// ==========================================
+
 static BOOL IsTargetPlugin(NSString *title) {
     if (!title || title.length == 0) return NO;
     NSArray *targets = @[
@@ -143,9 +131,7 @@ static void HarvestItem(id item) {
     [gHarvestedPlugins addObject:item];
 }
 
-// ==========================================
-// 5. 构建并跳转二级页面 (纯逻辑，移除了这里面难看的强行 UI 注入)
-// ==========================================
+
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
     
@@ -169,11 +155,10 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     
     [viewModel setValue:@[section] forKey:@"sectionDataArray"];
     
-    // 💡 关键标记：给这个页面打上属于我们的烙印
- 
     objc_setAssociatedObject(subVC, kDYPluginViewModelKey, viewModel, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    UIViewController *topVC = rootVC;                  
-    if (!topVC) { 
+    
+    UIViewController *topVC = rootVC;
+    if (!topVC) {
         topVC = [UIApplication sharedApplication].keyWindow.rootViewController;
     }
     while (topVC.presentedViewController) {
@@ -189,9 +174,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     }
 }
 
-// ==========================================
-// 6. 视图拦截：精准注入搜索栏和底部文字
-// ==========================================
+
 %hook AWESettingBaseViewController
 - (id)viewModel {
     id orig = %orig;
@@ -202,17 +185,26 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 - (void)viewDidLoad {
     %orig;
     
-    // 💡只在属于我们的“收纳”页面注入 UI
     id customVM = objc_getAssociatedObject(self, kDYPluginViewModelKey);
     if (customVM) {
         CGFloat screenW = [UIScreen mainScreen].bounds.size.width;
         CGFloat screenH = [UIScreen mainScreen].bounds.size.height;
         
-        // 1. 替换导航栏标题
-        CGFloat navBottomY = 88.0; // 默认高度
+      
+        for (UIView *sub in self.view.subviews) {
+            if ([sub isKindOfClass:[UILabel class]]) {
+                UILabel *lbl = (UILabel *)sub;
+                if ([lbl.text localizedCaseInsensitiveContainsString:@"XUU"]) {
+                    [lbl removeFromSuperview];
+                }
+            }
+        }
+        
+     
+        CGFloat navBottomY = 88.0; 
         for (UIView *sub in self.view.subviews) {
             if ([sub isKindOfClass:NSClassFromString(@"AWENavigationBar")]) {
-                navBottomY = CGRectGetMaxY(sub.frame); // 获取导航栏底部的真实Y坐标
+                navBottomY = CGRectGetMaxY(sub.frame); 
                 if ([sub respondsToSelector:@selector(titleLabel)]) {
                     UILabel *lbl = [sub valueForKey:@"titleLabel"];
                     lbl.text = @"收纳";
@@ -220,12 +212,12 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             }
         }
         
-        // 2. 注入搜索框容器
+     
         UIView *headerContainer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, screenW, 56)];
         headerContainer.backgroundColor = [UIColor clearColor];
         
         UITextField *searchBox = [[UITextField alloc] initWithFrame:CGRectMake(16, 10, screenW - 32, 36)];
-        searchBox.placeholder = @"🔍 搜索已收纳的插件...";
+        searchBox.placeholder = @"🔍 怎么能够做到全局搜索啊"; // <-- 在这里！
         searchBox.backgroundColor = [UIColor colorWithRed:0.95 green:0.95 blue:0.96 alpha:1.0];
         searchBox.layer.cornerRadius = 8;
         searchBox.clipsToBounds = YES;
@@ -247,7 +239,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         
         [searchBox addTarget:gSearchHandler action:@selector(textFieldDidChange:) forControlEvents:UIControlEventEditingChanged];
         
-        // 尝试设置为 TableView 的 Header
+     
         BOOL injectedAsHeader = NO;
         for (UIView *v in self.view.subviews) {
             if ([v isKindOfClass:[UITableView class]]) {
@@ -257,7 +249,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             }
         }
         
-        // 兼容 CollectionView: 如果没法做 Header，就悬浮在导航栏下方，并把列表往下挤
         if (!injectedAsHeader) {
             headerContainer.frame = CGRectMake(0, navBottomY, screenW, 56);
             [self.view addSubview:headerContainer];
@@ -266,14 +257,14 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
                 if (([v isKindOfClass:[UITableView class]] || [v isKindOfClass:[UICollectionView class]]) && v != headerContainer) {
                     UIScrollView *sv = (UIScrollView *)v;
                     UIEdgeInsets inset = sv.contentInset;
-                    inset.top += 56; // 挤出搜索框的高度
+                    inset.top += 56;
                     sv.contentInset = inset;
                     break;
                 }
             }
         }
 
-        // 3. 注入底部 UITextView (带链接)
+
         UITextView *footerView = [[UITextView alloc] initWithFrame:CGRectMake(0, screenH - 180, screenW, 120)];
         footerView.backgroundColor = [UIColor clearColor];
         footerView.editable = NO;
@@ -305,9 +296,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 }
 %end
 
-// ==========================================
-// 7. 宏观清洗与底层清洗 (保持原样，提供入口和去重)
-// ==========================================
+
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
     NSArray *originalSections = %orig;
