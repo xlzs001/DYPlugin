@@ -408,7 +408,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             [finalSections addObject:section];
             continue;
         }
-        NSString *sectionTitle = [sectionHeaderTitle valueForKey:@"sectionHeaderTitle"];
+       NSString *sectionTitle = [section valueForKey:@"sectionHeaderTitle"];
         
         if ([sectionTitle isEqualToString:@"收纳"]) {
             hasMgrSection = YES;
