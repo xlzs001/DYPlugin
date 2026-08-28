@@ -37,7 +37,6 @@
 // ==========================================
 // 2. 核心状态存储
 // ==========================================
-// 改为存储整个 section 或者独立封装，保证插件各自的完整性
 static NSMutableArray *gHarvestedSections = nil; 
 static void *kDYPluginViewModelKey = &kDYPluginViewModelKey;
 static id gDummyViewModel = nil; 
@@ -61,7 +60,6 @@ static BOOL IsTargetPluginTitle(NSString *title) {
     return NO;
 }
 
-// 检查某个 Section 是否属于插件独立区块
 static BOOL IsPluginSection(id section) {
     if (![section respondsToSelector:@selector(sectionHeaderTitle)]) return NO;
     NSString *headerTitle = [section valueForKey:@"sectionHeaderTitle"];
@@ -69,7 +67,6 @@ static BOOL IsPluginSection(id section) {
         return YES;
     }
     
-    // 检查内部 item 有没有匹配的
     if ([section respondsToSelector:@selector(itemArray)]) {
         NSArray *items = [section valueForKey:@"itemArray"];
         for (id item in items) {
@@ -88,7 +85,6 @@ static void HarvestSection(id section) {
     
     NSString *secTitle = [section respondsToSelector:@selector(sectionHeaderTitle)] ? [section valueForKey:@"sectionHeaderTitle"] : nil;
     
-    // 去重
     for (id existing in gHarvestedSections) {
         NSString *exTitle = [existing respondsToSelector:@selector(sectionHeaderTitle)] ? [existing valueForKey:@"sectionHeaderTitle"] : nil;
         if (secTitle && exTitle && [secTitle isEqualToString:exTitle]) {
@@ -100,7 +96,7 @@ static void HarvestSection(id section) {
 }
 
 // ==========================================
-// 4. 构建并展示原生二级页面（支持多个Section，完美保留每个插件自己的子菜单）
+// 4. 构建并展示原生二级页面
 // ==========================================
 static void ShowPluginManagerPage(UIViewController *rootVC) {
     UIViewController *subVC = [[NSClassFromString(@"AWESettingBaseViewController") alloc] init];
@@ -131,24 +127,25 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
     
     NSMutableArray *finalSectionArray = [NSMutableArray array];
     
-    // 把收割到的所有插件 Section 放进来
     if (gHarvestedSections) {
         [finalSectionArray addObjectsFromArray:gHarvestedSections];
     }
     
-    // 额外在最底部追加一个“仓库地址”的分区
     NSMutableArray *repoItems = [NSMutableArray array];
     AWESettingItemModel *repoItem = [[%c(AWESettingItemModel) alloc] init];
     repoItem.identifier = @"DYPluginRepoAddress";
-    repoItem.title = @"https://github.com/xlzs001/DYstorage";
-    repoItem.detail = @"GitHub";
+    repoItem.title = @"仓库地址";
+    repoItem.detail = @"点击访问 GitHub / 源码";
     repoItem.type = 0;
     repoItem.svgIconImageName = @"ic_link_outlined_20";
     repoItem.cellType = 26; 
     repoItem.colorStyle = 0;
     repoItem.isEnable = YES;
+    
+    __weak typeof(repoItem) weakRepoItem = repoItem;
     repoItem.cellTappedBlock = ^{
-        NSURL *url = [NSURL URLWithString:@"https://github.com/xlzs001/DYstorage]; // 请改成你的仓库地址
+        __strong typeof(weakRepoItem) strongRepoItem = weakRepoItem;
+        NSURL *url = [NSURL URLWithString:@"https://github.com/xlzs001/DYstorage"];
         if (url) {
             if (@available(iOS 10.0, *)) {
                 [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
@@ -196,7 +193,7 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
 %end
 
 // ==========================================
-// 5. 第一重清洗：拦截主页区块，把插件整块收割
+// 5. 第一重清洗：拦截主页区块
 // ==========================================
 %hook AWESettingsViewModel
 - (NSArray *)sectionDataArray {
@@ -228,7 +225,6 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
             continue;
         }
         
-        // 如果整个区块属于插件，直接收割整块 Section，不在主页显示
         if (IsPluginSection(section)) {
             HarvestSection(section);
             continue; 
@@ -282,21 +278,13 @@ static void ShowPluginManagerPage(UIViewController *rootVC) {
         headerTitle = [self valueForKey:@"sectionHeaderTitle"];
     }
     
-    // 如果是我们的收纳页面，绝对放行
     if ([headerTitle isEqualToString:@"已收纳的插件"] || [headerTitle isEqualToString:@"收纳"] || [headerTitle isEqualToString:@"关于项目"]) {
         return items;
     }
     
-    // 主页过滤单个散落的插件项
     NSMutableArray *cleanItems = [NSMutableArray array];
     for (id item in items) {
-        NSString *itemTitle = [item valueForKey:@"title"];
-        if (IsTargetPluginTitle(itemTitle)) {
-            // 单独项不破坏
-            [cleanItems addObject:item];
-        } else {
-            [cleanItems addObject:item];
-        }
+        [cleanItems addObject:item];
     }
     return cleanItems;
 }
