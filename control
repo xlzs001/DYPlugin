@@ -1,7 +1,7 @@
-Package: com.yourname.dypluginmgr
+Package: com.storage
 Name: DYPluginMgr
 Depends: mobilesubstrate
-Version: 1.0.0
+Version: 1.0.2
 Architecture: iphoneos-arm64
 Description: 插件收纳
 Maintainer: YourName
