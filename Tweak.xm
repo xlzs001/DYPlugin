@@ -481,11 +481,6 @@ static void DYStorageOpenRegistration(DYStorageRegistration *registration) {
 }
 @end
 
-static void DYStorageShowSearch(UIViewController *rootController) {
-    DYStorageSearchViewController *controller = [[DYStorageSearchViewController alloc] init];
-    DYStoragePresentController(controller, rootController);
-}
-
 static UIView *DYStorageMakeAboutFooter(void) {
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 0, 112)];
     footer.backgroundColor = UIColor.clearColor;
