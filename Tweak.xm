@@ -36,6 +36,7 @@ static BOOL gDYStorageHubHookInstalled = NO;
 static BOOL gDYStorageSectionFallbackHookInstalled = NO;
 static BOOL gDYStorageSectionHeaderHookInstalled = NO;
 static BOOL gDYStorageHubInsertedOnMainSettings = NO;
+static BOOL gDYStorageHubPageVisible = NO;
 static BOOL gDYStorageOrganizingMainSections = NO;
 static BOOL gDYStorageCheckingFallbackHeader = NO;
 
@@ -173,7 +174,7 @@ static NSArray<NSString *> *DYStorageKnownPluginTitles(void) {
         titles = @[
             @"DYYY", @"DYKiller", @"AwemeX", @"DouyinHelper",
             @"抖音助手", @"抖音图层", @"抖+", @"抖⁺", @"抖＋",
-            @"自动消息", @"aweJ", @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", @"XUU", @"Yuki"
+            @"自动消息", @"aweJ", @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", @"𝙓𝙐𝙐²", @"XUU²", @"XUU", @"Yuki"
         ];
     });
     return titles;
@@ -245,8 +246,7 @@ static BOOL DYStorageItemIsHubEntry(id item) {
     return [DYStorageStringValue(item, @"identifier") isEqualToString:kDYStorageHubEntryIdentifier];
 }
 
-static BOOL DYStorageIsXUUAssistantSection(id section) {
-    NSArray *items = DYStorageArrayValue(section, @"itemArray");
+static BOOL DYStorageIsXUUAssistantSectionWithItems(id section, NSArray *items) {
     if (items.count != 1) return NO;
     NSString *header = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
     NSString *itemTitle = DYStorageNormalizedString(DYStorageStringValue(items.firstObject, @"title"));
@@ -261,7 +261,7 @@ static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
     if (![sections isKindOfClass:[NSArray class]]) return sections;
     NSMutableArray *cleaned = [NSMutableArray arrayWithCapacity:sections.count];
     for (id section in sections) {
-        if (DYStorageIsXUUAssistantSection(section)) continue;
+        if (DYStorageIsXUUAssistantSectionWithItems(section, DYStorageArrayValue(section, @"itemArray"))) continue;
         [cleaned addObject:section];
     }
     return cleaned;
@@ -432,6 +432,26 @@ static UIView *DYStorageMakeAboutFooter(void) {
     return footer;
 }
 
+static void DYStorageInstallAboutFooter(UIViewController *controller) {
+    if (!controller || !controller.isViewLoaded) return;
+    UIView *footer = DYStorageMakeAboutFooter();
+    footer.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:footer];
+    UITableView *tableView = DYStorageFindTableView(controller.view, 6);
+    if (tableView) {
+        UIEdgeInsets inset = tableView.contentInset;
+        inset.bottom = MAX(inset.bottom, 112.0);
+        tableView.contentInset = inset;
+        tableView.scrollIndicatorInsets = inset;
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [footer.leadingAnchor constraintEqualToAnchor:controller.view.leadingAnchor],
+        [footer.trailingAnchor constraintEqualToAnchor:controller.view.trailingAnchor],
+        [footer.bottomAnchor constraintEqualToAnchor:controller.view.safeAreaLayoutGuide.bottomAnchor],
+        [footer.heightAnchor constraintEqualToConstant:112.0]
+    ]];
+}
+
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
     NSArray *capturedItems = [manager capturedSettingsItems];
@@ -547,8 +567,7 @@ static BOOL DYStorageIsFallbackPluginEntrySection(id section, NSArray *items) {
         if (![header isEqualToString:@"xuuᶻ"] && ![header isEqualToString:@"xuu"]) return NO;
         if (!DYStorageItemIsTargetPlugin(item) ||
             ![DYStorageNormalizedString(DYStorageStringValue(item, @"title")) isEqualToString:@"抖音助手"]) return NO;
-        NSNumber *cellType = DYStorageValue(item, @"cellType");
-        return [cellType isKindOfClass:[NSNumber class]] && cellType.integerValue == 26;
+        return YES;
     }
 
     id item = items.firstObject;
@@ -687,12 +706,13 @@ static void DYStorageInstallAvailableHooks(void);
 
 - (NSArray *)itemArray {
     NSArray *items = %orig;
-    if (gDYStorageOrganizingMainSections || !gDYStorageHubInsertedOnMainSettings ||
-        !DYStorageIsFallbackPluginEntrySection(self, items)) {
+    BOOL hideHubDuplicate = gDYStorageHubPageVisible && DYStorageIsXUUAssistantSectionWithItems(self, items);
+    BOOL hideLateRoot = gDYStorageHubInsertedOnMainSettings && DYStorageIsFallbackPluginEntrySection(self, items);
+    if (gDYStorageOrganizingMainSections || (!hideHubDuplicate && !hideLateRoot)) {
         return items;
     }
 
-    [[DYStorageManager sharedManager] captureSettingsItems:items];
+    if (hideLateRoot) [[DYStorageManager sharedManager] captureSettingsItems:items];
     objc_setAssociatedObject(self,
                              kDYStorageFallbackHiddenSectionKey,
                              @YES,
@@ -716,7 +736,8 @@ static void DYStorageInstallAvailableHooks(void);
     // late-added root section before this height is returned.
     if (!objc_getAssociatedObject(self, kDYStorageFallbackHiddenSectionKey) &&
         !gDYStorageOrganizingMainSections && !gDYStorageCheckingFallbackHeader &&
-        gDYStorageHubInsertedOnMainSettings && DYStorageSectionIsTargetPlugin(self)) {
+        (gDYStorageHubInsertedOnMainSettings || gDYStorageHubPageVisible) &&
+        DYStorageSectionIsTargetPlugin(self)) {
         gDYStorageCheckingFallbackHeader = YES;
         @try {
             (void)DYStorageArrayValue(self, @"itemArray");
@@ -745,15 +766,23 @@ static void DYStorageInstallAvailableHooks(void);
     %orig;
     if (!objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) return;
     [(UIViewController *)self setTitle:@"插件收纳"];
+    gDYStorageHubPageVisible = YES;
     DYStorageRefreshHubController((UIViewController *)self);
-    UITableView *tableView = DYStorageFindTableView(((UIViewController *)self).view, 6);
-    if (tableView) tableView.tableFooterView = DYStorageMakeAboutFooter();
+    DYStorageInstallAboutFooter((UIViewController *)self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+        gDYStorageHubPageVisible = YES;
         DYStorageRefreshHubController((UIViewController *)self);
+    }
+}
+
+- (void)viewDidDisappear:(BOOL)animated {
+    %orig;
+    if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+        gDYStorageHubPageVisible = NO;
     }
 }
 
