@@ -250,8 +250,11 @@ static BOOL DYStorageIsXUUAssistantSection(id section) {
     if (items.count != 1) return NO;
     NSString *header = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
     NSString *itemTitle = DYStorageNormalizedString(DYStorageStringValue(items.firstObject, @"title"));
-    return ([header isEqualToString:@"xuuᶻ"] || [header isEqualToString:@"xuu"]) &&
-           [itemTitle isEqualToString:@"抖音助手"];
+    BOOL xuuHeader = [header hasPrefix:@"xuu"] ||
+                     [header hasPrefix:@"𝙓𝙐𝙐"] ||
+                     [header hasPrefix:@"𝓧𝓤𝓤"] ||
+                     [header hasPrefix:@"𝕏𝕌𝕌"];
+    return xuuHeader && [itemTitle isEqualToString:@"抖音助手"];
 }
 
 static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
@@ -496,11 +499,11 @@ static UIView *DYStorageMakeAboutFooter(void) {
         view.translatesAutoresizingMaskIntoConstraints = NO;
         return view;
     };
-    UILabel *version = label([NSString stringWithFormat:@"Version: %@", kDYStorageVersion], 17.0);
-    UILabel *author = label(@"Developed by xlzs001", 16.0);
+    UILabel *version = label([NSString stringWithFormat:@"Version: %@", kDYStorageVersion], 14.0);
+    UILabel *author = label(@"Developed by xlzs001", 13.0);
     UIButton *repository = [UIButton buttonWithType:UIButtonTypeSystem];
     [repository setTitle:@"GitHub: xlzs001/DYstorage" forState:UIControlStateNormal];
-    repository.titleLabel.font = [UIFont systemFontOfSize:15.0];
+    repository.titleLabel.font = [UIFont systemFontOfSize:13.0];
     repository.translatesAutoresizingMaskIntoConstraints = NO;
     [repository addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
         NSURL *url = [NSURL URLWithString:kDYStorageRepositoryURL];
@@ -527,16 +530,6 @@ static NSArray *DYStorageHubSections(void) {
     NSArray<DYStorageRegistration *> *registeredPlugins = [manager registeredPlugins];
     NSMutableArray *sections = [NSMutableArray array];
     NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
-
-    id searchItem = DYStorageMakeItem(@"com.xlzs001.dystorage.search",
-                                       @"🔍 插件搜索",
-                                       @"全局搜索已收纳和已接入的插件",
-                                       @"ic_search_outlined_20",
-                                       ^{
-                                           DYStorageShowSearch(nil);
-                                       });
-    id searchSection = DYStorageMakeSection(@"com.xlzs001.dystorage.search.section", @"插件工具", searchItem ? @[ searchItem ] : @[]);
-    if (searchSection) [sections addObject:searchSection];
 
     if (capturedItems.count) {
         for (id item in capturedItems) {
