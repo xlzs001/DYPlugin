@@ -1,0 +1,9 @@
+Package: com.xlzs001.dystorage
+Name: DYStorage
+Version: 1.2.0
+Architecture: iphoneos-arm64
+Description: Organizes compatible third-party Douyin tweak settings in one entry.
+Maintainer: DYStorage Contributors
+Author: DYStorage Contributors
+Section: Tweaks
+Depends: mobilesubstrate

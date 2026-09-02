@@ -1,0 +1,51 @@
+name: Build DYStorage
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build package
+    runs-on: macos-latest
+    env:
+      THEOS: ${{ github.workspace }}/theos
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install ldid
+        run: brew install ldid
+
+      - name: Install Theos and SDKs
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/theos/theos.git "$THEOS"
+          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+
+      - name: Build package
+        run: make package FINALPACKAGE=1
+
+      - name: Stage versioned package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_file="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$package_file"
+          version="$(awk '/^Version:/ { print $2; exit }' control)"
+          mkdir -p output_packages
+          cp "$package_file" "output_packages/DYStorage_${version}.deb"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: DYStorage-Packages
+          path: output_packages/*.deb
+          if-no-files-found: error
