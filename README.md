@@ -11,6 +11,8 @@ DYStorage 是注入抖音的 Theos tweak。它把兼容第三方插件散落在�
 - 收纳 DYYY 等已知插件的**单项根入口 section**；对于混在普通 section 里的已知插件项，只有能安全复制原 section 时才剔除目标项，绝不原地改写其他 tweak 的模型。
 - 复用被收纳 `AWESettingItemModel` 的原始 `cellTappedBlock`，不需要猜测 DYYY 的设置控制器类名。
 - 提供可实际调用的运行时注册 API，供没有标准设置 section 的插件主动接入。
+- 收纳页顶部提供“🔍 插件搜索”，可按插件名称或版本号搜索所有已收纳、主动接入的插件。
+- 收纳页底部显示版本、作者、版权和可点击的 GitHub 仓库地址。
 - 启动后在主线程延迟安装 Hook，让 `%orig` 通常能看到 DYYY 已经插入的 section；另有仅匹配“单项根入口”的 section-model 兜底，以处理后装载 Hook 追加的同类入口。
 
 不做的事情：不扫描 `UIWindow` / `UIView`，不拦截悬浮球，不模糊匹配普通页面文本，也不接管抖音的收藏网络请求。这些做法容易误伤正常 UI 或在版本更新后崩溃。

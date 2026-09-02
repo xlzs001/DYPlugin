@@ -25,6 +25,8 @@ static NSString *const kDYStorageHubSectionIdentifier = @"com.xlzs001.dystorage.
 static NSString *const kDYStorageHubEntryIdentifier = @"com.xlzs001.dystorage.open";
 static NSString *const kDYStorageHubContentIdentifier = @"com.xlzs001.dystorage.content";
 static NSString *const kDYStorageHubMarkerTitle = @"__DYStorage_Hub__";
+static NSString *const kDYStorageVersion = @"1.2.0";
+static NSString *const kDYStorageRepositoryURL = @"https://github.com/xlzs001/DYstorage";
 
 static void *kDYStorageViewModelAssociationKey = &kDYStorageViewModelAssociationKey;
 static void *kDYStorageFallbackHiddenSectionKey = &kDYStorageFallbackHiddenSectionKey;
@@ -161,7 +163,7 @@ static NSArray<NSString *> *DYStorageKnownPluginTitles(void) {
         titles = @[
             @"DYYY", @"DYKiller", @"AwemeX", @"DouyinHelper",
             @"抖音助手", @"抖音图层", @"抖+", @"抖⁺", @"抖＋",
-            @"aweJ", @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", @"XUU", @"Yuki"
+            @"自动消息", @"aweJ", @"SJJAwemeLoginRepair", @"𝙓𝙐𝙐ᶻ", @"XUU", @"Yuki"
         ];
     });
     return titles;
@@ -360,12 +362,114 @@ static void DYStorageOpenRegistration(DYStorageRegistration *registration) {
     else dispatch_async(dispatch_get_main_queue(), open);
 }
 
+@interface DYStorageSearchViewController : UIViewController <UISearchBarDelegate, UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UISearchBar *searchBar;
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, copy) NSArray<NSDictionary *> *allRows;
+@property (nonatomic, copy) NSArray<NSDictionary *> *filteredRows;
+@end
+
+@implementation DYStorageSearchViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"插件搜索";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    self.searchBar = [[UISearchBar alloc] init];
+    self.searchBar.prompt = @"🔍 如何做到全局搜索：输入插件名称或版本号";
+    self.searchBar.placeholder = @"搜索全部插件";
+    self.searchBar.delegate = self;
+    self.searchBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:self.searchBar];
+
+    self.tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
+    self.tableView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.tableView.dataSource = self;
+    self.tableView.delegate = self;
+    [self.view addSubview:self.tableView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.searchBar.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.searchBar.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.searchBar.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.tableView.topAnchor constraintEqualToAnchor:self.searchBar.bottomAnchor],
+        [self.tableView.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.tableView.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.tableView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+    ]];
+
+    NSMutableArray *rows = [NSMutableArray array];
+    DYStorageManager *manager = [DYStorageManager sharedManager];
+    for (id item in manager.capturedSettingsItems) {
+        NSString *title = DYStorageStringValue(item, @"title");
+        if (!title.length) continue;
+        void (^action)(void) = DYStorageValue(item, @"cellTappedBlock");
+        [rows addObject:@{ @"title": title,
+                           @"detail": DYStorageStringValue(item, @"detail") ?: @"",
+                           @"action": action ?: ^{} }];
+    }
+    for (DYStorageRegistration *registration in manager.registeredPlugins) {
+        if (!registration.title.length) continue;
+        __weak DYStorageRegistration *weakRegistration = registration;
+        [rows addObject:@{ @"title": registration.title,
+                           @"detail": registration.version ?: @"",
+                           @"action": ^{ DYStorageOpenRegistration(weakRegistration); } }];
+    }
+    self.allRows = rows;
+    self.filteredRows = rows;
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    NSString *query = DYStorageNormalizedString(searchText);
+    if (!query.length) {
+        self.filteredRows = self.allRows;
+    } else {
+        self.filteredRows = [self.allRows filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSDictionary *row, NSDictionary *_) {
+            NSString *haystack = [NSString stringWithFormat:@"%@ %@", row[@"title"], row[@"detail"]].lowercaseString;
+            return [haystack containsString:query];
+        }]];
+    }
+    [self.tableView reloadData];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section { return self.filteredRows.count; }
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"DYStorageSearchCell"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"DYStorageSearchCell"];
+    NSDictionary *row = self.filteredRows[indexPath.row];
+    cell.textLabel.text = row[@"title"];
+    cell.detailTextLabel.text = row[@"detail"];
+    cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
+    return cell;
+}
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    void (^action)(void) = self.filteredRows[indexPath.row][@"action"];
+    if (action) action();
+}
+@end
+
+static void DYStorageShowSearch(UIViewController *rootController) {
+    DYStorageSearchViewController *controller = [[DYStorageSearchViewController alloc] init];
+    DYStoragePresentController(controller, rootController);
+}
+
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
     NSArray *capturedItems = [manager capturedSettingsItems];
     NSArray<DYStorageRegistration *> *registeredPlugins = [manager registeredPlugins];
     NSMutableArray *sections = [NSMutableArray array];
     NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
+
+    id searchItem = DYStorageMakeItem(@"com.xlzs001.dystorage.search",
+                                       @"🔍 插件搜索",
+                                       @"全局搜索已收纳和已接入的插件",
+                                       @"ic_search_outlined_20",
+                                       ^{
+                                           DYStorageShowSearch(nil);
+                                       });
+    id searchSection = DYStorageMakeSection(@"com.xlzs001.dystorage.search.section", @"插件工具", searchItem ? @[ searchItem ] : @[]);
+    if (searchSection) [sections addObject:searchSection];
 
     if (capturedItems.count) {
         for (id item in capturedItems) {
@@ -398,6 +502,43 @@ static NSArray *DYStorageHubSections(void) {
         id registeredSection = DYStorageMakeSection(@"com.xlzs001.dystorage.registered", @"主动接入", registeredItems);
         if (registeredSection) [sections addObject:registeredSection];
     }
+
+    id versionItem = DYStorageMakeItem(@"com.xlzs001.dystorage.version",
+                                       [NSString stringWithFormat:@"Version: %@", kDYStorageVersion],
+                                       @"",
+                                       @"ic_info_outlined_20",
+                                       nil);
+    id authorItem = DYStorageMakeItem(@"com.xlzs001.dystorage.author",
+                                      @"Developed by xlzs001",
+                                      @"",
+                                      @"ic_person_outlined_20",
+                                      nil);
+    id copyrightItem = DYStorageMakeItem(@"com.xlzs001.dystorage.copyright",
+                                         @"© 2026 xlzs001. All rights reserved.",
+                                         @"",
+                                         @"ic_info_outlined_20",
+                                         nil);
+    id repositoryItem = DYStorageMakeItem(@"com.xlzs001.dystorage.repository",
+                                           @"GitHub: xlzs001/DYstorage",
+                                           kDYStorageRepositoryURL,
+                                           @"ic_link_outlined_20",
+                                           ^{
+                                               NSURL *url = [NSURL URLWithString:kDYStorageRepositoryURL];
+                                               if (!url) return;
+                                               UIApplication *application = [UIApplication sharedApplication];
+                                               if ([application respondsToSelector:@selector(openURL:options:completionHandler:)]) {
+                                                   [application openURL:url options:@{} completionHandler:nil];
+                                               }
+                                           });
+    NSMutableArray *aboutItems = [NSMutableArray array];
+    if (versionItem) [aboutItems addObject:versionItem];
+    if (authorItem) [aboutItems addObject:authorItem];
+    if (copyrightItem) [aboutItems addObject:copyrightItem];
+    if (repositoryItem) [aboutItems addObject:repositoryItem];
+    id aboutSection = DYStorageMakeSection(@"com.xlzs001.dystorage.about",
+                                           @"关于 DYStorage",
+                                           aboutItems);
+    if (aboutSection) [sections addObject:aboutSection];
 
     if (sections.count == 0) {
         id emptyItem = DYStorageMakeItem(@"com.xlzs001.dystorage.empty",
@@ -465,7 +606,19 @@ static BOOL DYStorageIsStandalonePluginEntrySection(id section, NSArray *items) 
 /// cellType 26 for their one-row root entry. Requiring that shape avoids hiding
 /// an unrelated one-row section merely because its visible title overlaps.
 static BOOL DYStorageIsFallbackPluginEntrySection(id section, NSArray *items) {
-    if (!DYStorageIsStandalonePluginEntrySection(section, items)) return NO;
+    if (!DYStorageIsStandalonePluginEntrySection(section, items)) {
+        // XUU's current build puts “抖音助手” in a one-row section headed
+        // “XUUᶻ”, so it cannot satisfy the usual title==identifier shape.
+        // Keep this exception exact to avoid hiding ordinary settings groups.
+        if (items.count != 1) return NO;
+        NSString *header = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
+        id item = items.firstObject;
+        if (![header isEqualToString:@"xuuᶻ"] && ![header isEqualToString:@"xuu"]) return NO;
+        if (!DYStorageItemIsTargetPlugin(item) ||
+            ![DYStorageNormalizedString(DYStorageStringValue(item, @"title")) isEqualToString:@"抖音助手"]) return NO;
+        NSNumber *cellType = DYStorageValue(item, @"cellType");
+        return [cellType isKindOfClass:[NSNumber class]] && cellType.integerValue == 26;
+    }
 
     id item = items.firstObject;
     NSString *sectionTitle = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
