@@ -14,26 +14,30 @@ jobs:
   build:
     name: Build package
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        scheme: [rootful, rootless]
     env:
-      THEOS: ${{ github.workspace }}/theos
       HOMEBREW_NO_AUTO_UPDATE: "1"
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4.2.2
+        with:
+          submodules: true
 
-      - name: Install ldid
-        run: brew install ldid
-
-      - name: Install Theos and SDKs
+      - name: Check Theos cache
         run: |
-          git clone --depth 1 --recurse-submodules https://github.com/theos/theos.git "$THEOS"
-          rm -rf "$THEOS/sdks"
-          git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
+          echo "upstream_heads=$(git ls-remote https://github.com/roothide/theos | head -n 1 | cut -f 1)-$(git ls-remote https://github.com/theos/sdks | head -n 1 | cut -f 1)" >> "$GITHUB_ENV"
+
+      - name: Use Theos cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/theos
+          key: ${{ runner.os }}-${{ env.upstream_heads }}
+
+      - name: Prepare Theos
+        uses: huami1314/theos-action@main
+
+      - name: Setup GNU Make
+        run: echo "$(brew --prefix)/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Set incrementing package version
         run: |
@@ -46,10 +50,10 @@ jobs:
 
       - name: Build package
         run: |
-          if [ "${{ matrix.scheme }}" = "rootless" ]; then
-            export THEOS_PACKAGE_SCHEME=rootless
-          fi
-          make clean package FINALPACKAGE=1
+          rm -rf .theos packages output_packages
+          make package FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
 
       - name: Stage versioned package
         shell: bash
@@ -57,13 +61,12 @@ jobs:
           set -euo pipefail
           package_file="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
           test -n "$package_file"
-          version="$(awk '/^Version:/ { print $2; exit }' control)"
           mkdir -p output_packages
-          cp "$package_file" "output_packages/DYStorage_${{ matrix.scheme }}_${version}.deb"
+          cp packages/*.deb output_packages/
 
       - name: Upload package
         uses: actions/upload-artifact@v6
         with:
-          name: DYStorage-Packages-${{ matrix.scheme }}
+          name: DYStorage-Packages
           path: output_packages/*.deb
           if-no-files-found: error

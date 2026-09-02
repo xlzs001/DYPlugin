@@ -75,7 +75,7 @@ DYStorage 没有要求其他 tweak 链接它。下面的 Logos / Objective-C 示
 make package FINALPACKAGE=1
 ```
 
-GitHub Actions 会在 `main` 的任意源码、配置或工作流变更上分别构建 Rootful 和 Rootless 两种版本，生成版本化 `.deb` 并作为 `DYStorage-Packages-rootful`、`DYStorage-Packages-rootless` artifact 上传。工作流使用 Node 24 运行时的 `actions/checkout@v6` 与 `actions/upload-artifact@v6`，同时在找不到 `.deb` 时明确失败，避免误报成功。
+GitHub Actions 会参考 DYYY 的构建方式，一次构建 Rootful、Rootless、RootHide 三种 `.deb`。Artifact `DYStorage-Packages` 下载后解压即可直接看到三个 `.deb`，不会再套一层项目 ZIP。工作流使用 Theos 官方 Rootless 模块与 `roothide/theos`，并在找不到 `.deb` 时明确失败，避免误报成功。
 
 ## 参考
 
