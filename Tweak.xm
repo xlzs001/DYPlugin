@@ -152,6 +152,16 @@ static void DYStorageReloadListsInView(UIView *view, NSInteger depth) {
     }
 }
 
+static UITableView *DYStorageFindTableView(UIView *view, NSInteger depth) {
+    if (!view || depth < 0) return nil;
+    if ([view isKindOfClass:[UITableView class]]) return (UITableView *)view;
+    for (UIView *subview in view.subviews) {
+        UITableView *tableView = DYStorageFindTableView(subview, depth - 1);
+        if (tableView) return tableView;
+    }
+    return nil;
+}
+
 #pragma mark - Discovery rules
 
 static NSArray<NSString *> *DYStorageKnownPluginTitles(void) {
@@ -233,6 +243,25 @@ static BOOL DYStorageSectionIsHub(id section) {
 
 static BOOL DYStorageItemIsHubEntry(id item) {
     return [DYStorageStringValue(item, @"identifier") isEqualToString:kDYStorageHubEntryIdentifier];
+}
+
+static BOOL DYStorageIsXUUAssistantSection(id section) {
+    NSArray *items = DYStorageArrayValue(section, @"itemArray");
+    if (items.count != 1) return NO;
+    NSString *header = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
+    NSString *itemTitle = DYStorageNormalizedString(DYStorageStringValue(items.firstObject, @"title"));
+    return ([header isEqualToString:@"xuuᶻ"] || [header isEqualToString:@"xuu"]) &&
+           [itemTitle isEqualToString:@"抖音助手"];
+}
+
+static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
+    if (![sections isKindOfClass:[NSArray class]]) return sections;
+    NSMutableArray *cleaned = [NSMutableArray arrayWithCapacity:sections.count];
+    for (id section in sections) {
+        if (DYStorageIsXUUAssistantSection(section)) continue;
+        [cleaned addObject:section];
+    }
+    return cleaned;
 }
 
 static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
@@ -454,6 +483,44 @@ static void DYStorageShowSearch(UIViewController *rootController) {
     DYStoragePresentController(controller, rootController);
 }
 
+static UIView *DYStorageMakeAboutFooter(void) {
+    UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 0, 112)];
+    footer.backgroundColor = UIColor.clearColor;
+
+    UILabel *(^label)(NSString *, CGFloat) = ^UILabel *(NSString *text, CGFloat size) {
+        UILabel *view = [[UILabel alloc] init];
+        view.text = text;
+        view.textAlignment = NSTextAlignmentCenter;
+        view.textColor = [UIColor secondaryLabelColor];
+        view.font = [UIFont systemFontOfSize:size];
+        view.translatesAutoresizingMaskIntoConstraints = NO;
+        return view;
+    };
+    UILabel *version = label([NSString stringWithFormat:@"Version: %@", kDYStorageVersion], 17.0);
+    UILabel *author = label(@"Developed by xlzs001", 16.0);
+    UIButton *repository = [UIButton buttonWithType:UIButtonTypeSystem];
+    [repository setTitle:@"GitHub: xlzs001/DYstorage" forState:UIControlStateNormal];
+    repository.titleLabel.font = [UIFont systemFontOfSize:15.0];
+    repository.translatesAutoresizingMaskIntoConstraints = NO;
+    [repository addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        NSURL *url = [NSURL URLWithString:kDYStorageRepositoryURL];
+        if (url) [[UIApplication sharedApplication] openURL:url options:@{} completionHandler:nil];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [footer addSubview:version];
+    [footer addSubview:author];
+    [footer addSubview:repository];
+    [NSLayoutConstraint activateConstraints:@[
+        [version.topAnchor constraintEqualToAnchor:footer.topAnchor constant:14],
+        [version.centerXAnchor constraintEqualToAnchor:footer.centerXAnchor],
+        [author.topAnchor constraintEqualToAnchor:version.bottomAnchor constant:7],
+        [author.centerXAnchor constraintEqualToAnchor:footer.centerXAnchor],
+        [repository.topAnchor constraintEqualToAnchor:author.bottomAnchor constant:10],
+        [repository.centerXAnchor constraintEqualToAnchor:footer.centerXAnchor],
+        [repository.bottomAnchor constraintLessThanOrEqualToAnchor:footer.bottomAnchor constant:-8]
+    ]];
+    return footer;
+}
+
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
     NSArray *capturedItems = [manager capturedSettingsItems];
@@ -502,43 +569,6 @@ static NSArray *DYStorageHubSections(void) {
         id registeredSection = DYStorageMakeSection(@"com.xlzs001.dystorage.registered", @"主动接入", registeredItems);
         if (registeredSection) [sections addObject:registeredSection];
     }
-
-    id versionItem = DYStorageMakeItem(@"com.xlzs001.dystorage.version",
-                                       [NSString stringWithFormat:@"Version: %@", kDYStorageVersion],
-                                       @"",
-                                       @"ic_info_outlined_20",
-                                       nil);
-    id authorItem = DYStorageMakeItem(@"com.xlzs001.dystorage.author",
-                                      @"Developed by xlzs001",
-                                      @"",
-                                      @"ic_person_outlined_20",
-                                      nil);
-    id copyrightItem = DYStorageMakeItem(@"com.xlzs001.dystorage.copyright",
-                                         @"© 2026 xlzs001. All rights reserved.",
-                                         @"",
-                                         @"ic_info_outlined_20",
-                                         nil);
-    id repositoryItem = DYStorageMakeItem(@"com.xlzs001.dystorage.repository",
-                                           @"GitHub: xlzs001/DYstorage",
-                                           kDYStorageRepositoryURL,
-                                           @"ic_link_outlined_20",
-                                           ^{
-                                               NSURL *url = [NSURL URLWithString:kDYStorageRepositoryURL];
-                                               if (!url) return;
-                                               UIApplication *application = [UIApplication sharedApplication];
-                                               if ([application respondsToSelector:@selector(openURL:options:completionHandler:)]) {
-                                                   [application openURL:url options:@{} completionHandler:nil];
-                                               }
-                                           });
-    NSMutableArray *aboutItems = [NSMutableArray array];
-    if (versionItem) [aboutItems addObject:versionItem];
-    if (authorItem) [aboutItems addObject:authorItem];
-    if (copyrightItem) [aboutItems addObject:copyrightItem];
-    if (repositoryItem) [aboutItems addObject:repositoryItem];
-    id aboutSection = DYStorageMakeSection(@"com.xlzs001.dystorage.about",
-                                           @"关于 DYStorage",
-                                           aboutItems);
-    if (aboutSection) [sections addObject:aboutSection];
 
     if (sections.count == 0) {
         id emptyItem = DYStorageMakeItem(@"com.xlzs001.dystorage.empty",
@@ -737,6 +767,14 @@ static void DYStorageInstallAvailableHooks(void);
 
 - (NSArray *)sectionDataArray {
     NSArray *sections = %orig;
+    // XUU hooks AWESettingsViewModel globally and can prepend its own section
+    // after DYStorage has built the hub model. Never show that duplicate on
+    // the organizer page; the preserved item already lives in our collection.
+    for (id section in sections) {
+        if (DYStorageSectionIsHubContent(section)) {
+            return DYStorageRemoveXUUFromHubSections(sections);
+        }
+    }
     return DYStorageOrganizedMainSections(self, sections);
 }
 
@@ -807,6 +845,8 @@ static void DYStorageInstallAvailableHooks(void);
     if (!objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) return;
     [(UIViewController *)self setTitle:@"插件收纳"];
     DYStorageRefreshHubController((UIViewController *)self);
+    UITableView *tableView = DYStorageFindTableView(((UIViewController *)self).view, 6);
+    if (tableView) tableView.tableFooterView = DYStorageMakeAboutFooter();
 }
 
 - (void)viewDidAppear:(BOOL)animated {

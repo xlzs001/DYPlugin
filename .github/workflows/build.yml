@@ -31,6 +31,15 @@ jobs:
           rm -rf "$THEOS/sdks"
           git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
 
+      - name: Set incrementing package version
+        run: |
+          base_version="$(awk '/^Version:/ { print $2; exit }' control)"
+          base_prefix="${base_version%.*}"
+          build_version="${base_prefix}.${GITHUB_RUN_NUMBER}"
+          sed -i '' -E "s/^Version:.*/Version: ${build_version}/" control
+          sed -i '' -E "s#kDYStorageVersion = @\"[^\"]*\"#kDYStorageVersion = @\"${build_version}\"#" Tweak.xm
+          echo "Building DYStorage version ${build_version}"
+
       - name: Build package
         run: make package FINALPACKAGE=1
 
