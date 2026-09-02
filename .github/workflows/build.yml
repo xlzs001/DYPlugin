@@ -28,6 +28,7 @@ jobs:
       - name: Install Theos and SDKs
         run: |
           git clone --depth 1 --recurse-submodules https://github.com/theos/theos.git "$THEOS"
+          rm -rf "$THEOS/sdks"
           git clone --depth 1 https://github.com/theos/sdks.git "$THEOS/sdks"
 
       - name: Build package
