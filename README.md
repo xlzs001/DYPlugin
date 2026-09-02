@@ -7,7 +7,7 @@ DYStorage 是注入抖音的 Theos tweak。它把兼容第三方插件散落在�
 ## 做了什么
 
 - 在抖音设置主页插入一个原生样式的“插件收纳” section；使用稳定的 identifier 防止重复插入。
-- 识别 DYYY（`huami1314/DYYY` 和 `pxx917144686/DYYY` 当前都使用的独立 `DYYY` section）以及一组常见插件根入口。
+- 识别 DYYY（`huami1314/DYYY`当前都使用的独立 `DYYY` section）以及一组常见插件根入口。
 - 收纳 DYYY 等已知插件的**单项根入口 section**；对于混在普通 section 里的已知插件项，只有能安全复制原 section 时才剔除目标项，绝不原地改写其他 tweak 的模型。
 - 复用被收纳 `AWESettingItemModel` 的原始 `cellTappedBlock`，不需要猜测 DYYY 的设置控制器类名。
 - 提供可实际调用的运行时注册 API，供没有标准设置 section 的插件主动接入。
@@ -79,6 +79,6 @@ GitHub Actions 会在 `main` 的任意源码、配置或工作流变更上构建
 
 ## 参考
 
-实现思路参考了 [huami1314/DYYY](https://github.com/huami1314/DYYY) 与 [pxx917144686/DYYY](https://github.com/pxx917144686/DYYY) 的设置入口 Hook：两者都会构建独立的 `AWESettingSectionModel` 并插入 `AWESettingsViewModel.sectionDataArray` 的首位。DYStorage 没有复制其设置页代码；它只保留已生成 entry 的原始回调。
+实现思路参考了 [huami1314/DYYY](https://github.com/huami1314/DYYY) 的设置入口 Hook：两者都会构建独立的 `AWESettingSectionModel` 并插入 `AWESettingsViewModel.sectionDataArray` 的首位。DYStorage 没有复制其设置页代码；它只保留已生成 entry 的原始回调。
 
 本项目采用 [MIT License](LICENSE)。
