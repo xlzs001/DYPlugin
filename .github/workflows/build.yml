@@ -51,18 +51,31 @@ jobs:
       - name: Build package
         run: |
           rm -rf .theos packages output_packages
+          mkdir -p output_packages
+
           make package FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          rootful_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$rootful_package"
+          version="$(awk '/^Version:/ { print $2; exit }' control)"
+          cp "$rootful_package" "output_packages/DYStorage_rootful_${version}.deb"
+
+          rm -rf packages .theos
           make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          rootless_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$rootless_package"
+          cp "$rootless_package" "output_packages/DYStorage_rootless_${version}.deb"
+
+          rm -rf packages .theos
           make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          roothide_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$roothide_package"
+          cp "$roothide_package" "output_packages/DYStorage_roothide_${version}.deb"
 
       - name: Stage versioned package
         shell: bash
         run: |
           set -euo pipefail
-          package_file="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$package_file"
-          mkdir -p output_packages
-          cp packages/*.deb output_packages/
+          test "$(find output_packages -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')" -eq 3
 
       - name: Upload package
         uses: actions/upload-artifact@v6
