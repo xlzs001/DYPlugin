@@ -1,10 +1,9 @@
-Package: com.storage
-Name: DYPluginMgr
-Depends: mobilesubstrate
-Version: 1.1.5
+Package: com.xlzs001.dystorage
+Name: DYStorage
+Version: 1.2.0
 Architecture: iphoneos-arm64
-Description: 插件收纳
-Maintainer: YourName
-Author: YourName
+Description: Organizes compatible third-party Douyin tweak settings in one entry.
+Maintainer: DYStorage Contributors
+Author: DYStorage Contributors
 Section: Tweaks
-
+Depends: mobilesubstrate
