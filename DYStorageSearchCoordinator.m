@@ -1,7 +1,6 @@
 #import "DYStorageSearchCoordinator.h"
 
 #import <UIKit/UIKit.h>
-#import <math.h>
 
 static UITableView *DYStorageSearchFindTableView(UIView *view, NSInteger depth) {
     if (!view || depth < 0) return nil;
@@ -31,16 +30,13 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic, strong) UIView *headerView;
 @property (nonatomic, strong) UIView *containerView;
 @property (nonatomic, strong) UITextField *searchTextField;
-@property (nonatomic, strong) UIView *placeholderView;
-@property (nonatomic, strong) UIImageView *placeholderIconView;
-@property (nonatomic, strong) UILabel *placeholderLabel;
 @property (nonatomic) UIEdgeInsets originalContentInset;
 @property (nonatomic) UIEdgeInsets originalIndicatorInset;
 @property (nonatomic) BOOL installedInsets;
 @property (nonatomic) NSUInteger pendingSearchGeneration;
 - (BOOL)installSearchHeader;
 - (NSString *)trimmedQuery;
-- (void)updatePlaceholderAnimated:(BOOL)animated;
+- (void)updateSupplementaryViewsForQuery:(NSString *)query;
 - (void)searchTextDidChange:(UITextField *)textField;
 @end
 
@@ -85,6 +81,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     self.searchTextField.spellCheckingType = UITextSpellCheckingTypeNo;
     self.searchTextField.delegate = self;
     self.searchTextField.accessibilityLabel = @"DYStorage聚合搜索";
+    self.searchTextField.placeholder = @"搜索设置项";
 
     UIView *leftView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 38, 30)];
     UIImageView *leftIcon = [[UIImageView alloc] initWithFrame:CGRectMake(14, 6, 18, 18)];
@@ -93,24 +90,11 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     leftIcon.tintColor = UIColor.secondaryLabelColor;
     [leftView addSubview:leftIcon];
     self.searchTextField.leftView = leftView;
-    self.searchTextField.leftViewMode = UITextFieldViewModeNever;
+    // Keep a stable text origin while editing. Switching the left icon on
+    // after the first character moved both the insertion caret and text.
+    self.searchTextField.leftViewMode = UITextFieldViewModeAlways;
     [self.searchTextField addTarget:self action:@selector(searchTextDidChange:) forControlEvents:UIControlEventEditingChanged];
     [self.containerView addSubview:self.searchTextField];
-
-    self.placeholderView = [[UIView alloc] initWithFrame:CGRectZero];
-    self.placeholderView.userInteractionEnabled = NO;
-    [self.containerView addSubview:self.placeholderView];
-
-    self.placeholderIconView = [[UIImageView alloc] initWithImage:[UIImage systemImageNamed:@"magnifyingglass"]];
-    self.placeholderIconView.contentMode = UIViewContentModeScaleAspectFit;
-    self.placeholderIconView.tintColor = UIColor.secondaryLabelColor;
-    [self.placeholderView addSubview:self.placeholderIconView];
-
-    self.placeholderLabel = [[UILabel alloc] initWithFrame:CGRectZero];
-    self.placeholderLabel.text = @"搜索设置项";
-    self.placeholderLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
-    self.placeholderLabel.textColor = UIColor.secondaryLabelColor;
-    [self.placeholderView addSubview:self.placeholderLabel];
 
     self.containerView.backgroundColor = UIColor.secondarySystemGroupedBackgroundColor;
     self.containerView.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -118,7 +102,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     self.containerView.layer.shadowOffset = CGSizeMake(0, 3);
     self.containerView.layer.shadowRadius = 3.5;
     self.searchTextField.textColor = UIColor.labelColor;
-    self.searchTextField.tintColor = UIColor.labelColor;
+    self.searchTextField.tintColor = UIColor.systemBlueColor;
 
     [self.controller.view addSubview:self.headerView];
     self.originalContentInset = tableView.contentInset;
@@ -138,42 +122,27 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     return [self.searchTextField.text ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
-- (void)updatePlaceholderAnimated:(BOOL)animated {
-    if (!self.placeholderView) return;
-    BOOL hasText = self.searchTextField.text.length > 0;
-    BOOL leftAligned = self.searchTextField.isEditing;
-    CGFloat iconSize = 18;
-    CGFloat spacing = 8;
-    CGSize labelSize = [self.placeholderLabel.text sizeWithAttributes:@{NSFontAttributeName: self.placeholderLabel.font}];
-    CGFloat placeholderWidth = iconSize + spacing + ceil(labelSize.width);
-    CGFloat placeholderHeight = MAX(iconSize, ceil(labelSize.height));
-    self.placeholderIconView.frame = CGRectMake(0, (placeholderHeight - iconSize) / 2, iconSize, iconSize);
-    self.placeholderLabel.frame = CGRectMake(iconSize + spacing, 0, ceil(labelSize.width), placeholderHeight);
-    CGFloat x = leftAligned ? 14 : (CGRectGetWidth(self.containerView.bounds) - placeholderWidth) / 2;
-    CGRect targetFrame = CGRectMake(MAX(x, 0), (CGRectGetHeight(self.containerView.bounds) - placeholderHeight) / 2,
-                                    placeholderWidth, placeholderHeight);
-    void (^changes)(void) = ^{
-        self.placeholderView.frame = targetFrame;
-        self.placeholderView.alpha = hasText ? 0 : 1;
-    };
-    if (animated) {
-        [UIView animateWithDuration:0.2 animations:changes];
-    } else {
-        changes();
+- (void)updateSupplementaryViewsForQuery:(NSString *)query {
+    BOOL searching = query.length > 0;
+    for (UIView *subview in self.controller.view.subviews) {
+        if ([subview.accessibilityIdentifier isEqualToString:@"DYStorageAboutFooter"]) {
+            subview.hidden = searching;
+        }
     }
-    self.searchTextField.leftViewMode = hasText ? UITextFieldViewModeAlways : UITextFieldViewModeNever;
 }
 
 - (void)refreshWithCurrentQuery {
     if (!self.sectionsProvider || !self.viewModel) return;
-    NSArray *sections = self.sectionsProvider([self trimmedQuery]) ?: @[];
+    NSString *query = [self trimmedQuery];
+    [self updateSupplementaryViewsForQuery:query];
+    NSArray *sections = self.sectionsProvider(query) ?: @[];
     if (!DYStorageSearchSetValue(self.viewModel, sections, @"sectionDataArray")) return;
     UITableView *tableView = self.tableView;
     [tableView reloadData];
 }
 
 - (void)searchTextDidChange:(__unused UITextField *)textField {
-    [self updatePlaceholderAnimated:NO];
+    [self updateSupplementaryViewsForQuery:[self trimmedQuery]];
     // Building native private-setting models for hundreds of catalog entries
     // is deliberately kept off the per-keystroke hot path. Coalesce rapid
     // edits so only the final query refreshes the table.
@@ -211,7 +180,6 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
         self.containerView.layer.shadowPath =
             [UIBezierPath bezierPathWithRoundedRect:self.containerView.bounds cornerRadius:12].CGPath;
         self.searchTextField.frame = self.containerView.bounds;
-        [self updatePlaceholderAnimated:NO];
     }
 
     // Reordering a subview on every layout pass can itself schedule additional
@@ -221,14 +189,6 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
         self.controller.view.subviews.lastObject != self.headerView) {
         [self.controller.view bringSubviewToFront:self.headerView];
     }
-}
-
-- (void)textFieldDidBeginEditing:(__unused UITextField *)textField {
-    [self updatePlaceholderAnimated:YES];
-}
-
-- (void)textFieldDidEndEditing:(__unused UITextField *)textField {
-    [self updatePlaceholderAnimated:YES];
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
