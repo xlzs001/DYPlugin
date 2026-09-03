@@ -503,6 +503,8 @@ static NSString *gDYStoragePendingFeatureTitle = nil;
 static NSArray<NSString *> *gDYStoragePendingFeatureRoute = nil;
 static NSUInteger gDYStoragePendingFeatureRouteIndex = 0;
 static __weak UIViewController *gDYStorageLastRouteController = nil;
+static NSArray<NSString *> *gDYStoragePendingFloatingRouteCandidates = nil;
+static NSUInteger gDYStoragePendingFloatingRouteIndex = 0;
 
 static void DYStoragePulseHighlightView(UIView *view) {
     if (!view) return;
@@ -673,6 +675,103 @@ static BOOL DYStorageLocateFeatureInTableViews(UIView *view,
 
     for (UIView *subview in [view.subviews reverseObjectEnumerator]) {
         if (DYStorageLocateFeatureInTableViews(subview, ignoredRoot, normalizedTitle, depth - 1)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageActivateFloatingRouteInTableViews(UIView *view,
+                                                        UIView *ignoredRoot,
+                                                        NSString *normalizedTitle,
+                                                        NSInteger depth) {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return NO;
+    if (ignoredRoot && (view == ignoredRoot || [view isDescendantOfView:ignoredRoot])) return NO;
+
+    if ([view isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)view;
+        id<UITableViewDataSource> dataSource = tableView.dataSource;
+        id<UITableViewDelegate> delegate = tableView.delegate;
+        NSInteger sectionCount = 0;
+        @try {
+            sectionCount = [dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]
+                ? [dataSource numberOfSectionsInTableView:tableView]
+                : (dataSource ? 1 : 0);
+        } @catch (__unused NSException *exception) {
+            sectionCount = 0;
+        }
+        sectionCount = MAX(0, MIN(sectionCount, 40));
+
+        NSInteger inspectedRows = 0;
+        for (NSInteger section = 0; section < sectionCount && inspectedRows < 300; section++) {
+            NSInteger rowCount = 0;
+            @try {
+                rowCount = [dataSource tableView:tableView numberOfRowsInSection:section];
+            } @catch (__unused NSException *exception) {
+                rowCount = 0;
+            }
+            rowCount = MAX(0, MIN(rowCount, 300 - inspectedRows));
+            for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
+                @autoreleasepool {
+                    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                    if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
+                        @try {
+                            cell = [dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
+                        } @catch (__unused NSException *exception) {
+                            cell = nil;
+                        }
+                    }
+                    if (!cell || !DYStorageFindFeatureTextView(cell, nil, normalizedTitle, 10)) continue;
+                    if (![delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) return NO;
+
+                    __weak UITableView *weakTableView = tableView;
+                    __weak id<UITableViewDelegate> weakDelegate = delegate;
+                    NSIndexPath *targetIndexPath = [indexPath copy];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        UITableView *strongTableView = weakTableView;
+                        id<UITableViewDelegate> strongDelegate = weakDelegate;
+                        if (!strongTableView ||
+                            ![strongDelegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) return;
+                        @try {
+                            [strongTableView scrollToRowAtIndexPath:targetIndexPath
+                                                   atScrollPosition:UITableViewScrollPositionMiddle
+                                                           animated:NO];
+                            [strongDelegate tableView:strongTableView didSelectRowAtIndexPath:targetIndexPath];
+                        } @catch (__unused NSException *exception) {
+                        }
+                    });
+                    return YES;
+                }
+            }
+        }
+    }
+
+    for (UIView *subview in [view.subviews reverseObjectEnumerator]) {
+        if (DYStorageActivateFloatingRouteInTableViews(subview,
+                                                       ignoredRoot,
+                                                       normalizedTitle,
+                                                       depth - 1)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageActivateFloatingRouteInVisibleWindows(UIViewController *sourceController,
+                                                            NSString *routeTitle) {
+    NSString *normalizedTitle = DYStorageNormalizedFeatureText(routeTitle);
+    if (!normalizedTitle.length) return NO;
+    UIView *ignoredRoot = DYStorageFindTableView(sourceController.viewIfLoaded, 8) ?: sourceController.viewIfLoaded;
+    NSArray<UIWindow *> *windows = [DYStorageWindows() sortedArrayUsingComparator:^NSComparisonResult(UIWindow *left,
+                                                                                                       UIWindow *right) {
+        if (left.windowLevel > right.windowLevel) return NSOrderedAscending;
+        if (left.windowLevel < right.windowLevel) return NSOrderedDescending;
+        if (left.isKeyWindow != right.isKeyWindow) return left.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    for (UIWindow *window in windows) {
+        if (window.hidden || window.alpha < 0.01) continue;
+        if (DYStorageActivateFloatingRouteInTableViews(window,
+                                                       ignoredRoot,
+                                                       normalizedTitle,
+                                                       24)) return YES;
     }
     return NO;
 }
@@ -866,6 +965,35 @@ static NSArray<NSString *> *DYStorageNavigationRouteForFeature(NSString *plugin,
     return page.length ? @[ page ] : @[];
 }
 
+static NSArray<NSString *> *DYStorageFloatingRouteCandidatesForFeature(NSString *plugin,
+                                                                        NSString *featureTitle) {
+    if ([plugin isEqualToString:@"抖音助手"]) {
+        NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+        NSString *title = DYStorageNormalizedFeatureText(featureTitle);
+        if ([title hasPrefix:@"隐藏"]) {
+            [candidates addObject:@"隐藏设置"];
+        } else if ([title hasPrefix:@"移除"]) {
+            [candidates addObject:@"移除顶栏"];
+        } else if ([title hasPrefix:@"设置"] || [title hasPrefix:@"时间"] ||
+                   [title hasPrefix:@"时长"] || [title hasPrefix:@"显示"] ||
+                   [title hasPrefix:@"作品日期"]) {
+            [candidates addObject:@"界面设置"];
+        } else {
+            [candidates addObject:@"增强设置"];
+        }
+        for (NSString *fallback in @[ @"增强设置", @"界面设置", @"隐藏设置", @"移除顶栏" ]) {
+            if (![candidates containsObject:fallback]) [candidates addObject:fallback];
+        }
+        return candidates;
+    }
+    if ([plugin isEqualToString:@"抖音图层"]) {
+        // AwemeX keeps the actual options behind a custom table row while the
+        // overlay remains attached to Douyin's settings window.
+        return @[ @"点击此栏打开配置", @"点此栏打开配置", @"图层配置" ];
+    }
+    return @[];
+}
+
 static BOOL DYStorageInvokeSettingsNavigationItem(UIViewController *controller,
                                                    NSString *title) {
     if (!controller || !title.length ||
@@ -929,6 +1057,8 @@ static void DYStorageClearPendingFeatureNavigation(NSUInteger generation) {
     gDYStoragePendingFeatureRoute = nil;
     gDYStoragePendingFeatureRouteIndex = 0;
     gDYStorageLastRouteController = nil;
+    gDYStoragePendingFloatingRouteCandidates = nil;
+    gDYStoragePendingFloatingRouteIndex = 0;
 }
 
 static BOOL DYStorageResolveFeatureInController(UIViewController *controller,
@@ -952,7 +1082,21 @@ static BOOL DYStorageTryLocateFeature(UIViewController *sourceController,
     if (DYStorageResolveFeatureInController(topController, sourceController, section, title)) {
         return YES;
     }
-    return DYStorageLocateFeatureInVisibleWindows(sourceController, title);
+    if (DYStorageLocateFeatureInVisibleWindows(sourceController, title)) return YES;
+
+    // Floating plug-ins do not push a UIViewController, so viewDidAppear cannot
+    // advance their internal pages. Select one known-safe category/config row
+    // per retry, then let the next retry locate the target in the updated table.
+    NSUInteger startIndex = gDYStoragePendingFloatingRouteIndex;
+    for (NSUInteger index = startIndex;
+         index < gDYStoragePendingFloatingRouteCandidates.count;
+         index++) {
+        NSString *candidate = gDYStoragePendingFloatingRouteCandidates[index];
+        if (!DYStorageActivateFloatingRouteInVisibleWindows(sourceController, candidate)) continue;
+        gDYStoragePendingFloatingRouteIndex = index + 1;
+        break;
+    }
+    return NO;
 }
 
 static void DYStorageResolvePendingFeatureForController(UIViewController *controller) {
@@ -983,6 +1127,7 @@ static void DYStorageResolvePendingFeatureForController(UIViewController *contro
 
 static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
                                           DYStorageAction openPlugin,
+                                          NSString *plugin,
                                           NSArray<NSString *> *route,
                                           NSString *section,
                                           NSString *title) {
@@ -994,6 +1139,9 @@ static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
     gDYStoragePendingFeatureRoute = [route copy] ?: @[];
     gDYStoragePendingFeatureRouteIndex = 0;
     gDYStorageLastRouteController = nil;
+    gDYStoragePendingFloatingRouteCandidates =
+        [DYStorageFloatingRouteCandidatesForFeature(plugin, title) copy];
+    gDYStoragePendingFloatingRouteIndex = 0;
     openPlugin();
 
     __weak UIViewController *weakSourceController = sourceController;
@@ -1053,7 +1201,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
             NSString *identifier = [NSString stringWithFormat:@"com.xlzs001.dystorage.search.%lu", (unsigned long)resultIndex++];
             __weak UIViewController *weakSourceController = sourceController;
             DYStorageAction resultAction = ^{
-                DYStorageOpenAndLocateFeature(weakSourceController, action, route, section, title);
+                DYStorageOpenAndLocateFeature(weakSourceController, action, plugin, route, section, title);
             };
             id resultItem = DYStorageMakeItem(identifier,
                                               title ?: @"未命名功能",
