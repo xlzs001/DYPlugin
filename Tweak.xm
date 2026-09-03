@@ -642,6 +642,11 @@ static void DYStorageInstallAboutFooter(UIViewController *controller) {
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
     DYStorageDeveloperScanner *scanner = [DYStorageDeveloperScanner sharedScanner];
+    BOOL developerUIEnabled = DYStorageDeveloperUIEnabled();
+    // A scan uses a repeating main-run-loop timer. If developer mode was
+    // disabled while a scan was active, stop it here so a hidden scanner can
+    // never keep traversing the complete window hierarchy indefinitely.
+    if (!developerUIEnabled && scanner.isScanning) [scanner stopScanning];
     NSArray *capturedItems = [manager capturedSettingsItems];
     NSArray<DYStorageRegistration *> *registeredPlugins = [manager registeredPlugins];
     NSMutableArray *sections = [NSMutableArray array];
@@ -701,7 +706,7 @@ static NSArray *DYStorageHubSections(void) {
         if (registeredSection) [sections addObject:registeredSection];
     }
 
-    if (DYStorageDeveloperUIEnabled()) {
+    if (developerUIEnabled) {
         NSString *scannerTitle = scanner.isScanning ? @"结束扫描并导出" : @"开发者扫描";
         NSString *scannerDetail = scanner.isScanning
             ? [NSString stringWithFormat:@"已记录 %lu 个功能，点击生成 JSON", (unsigned long)scanner.recordCount]
@@ -756,12 +761,18 @@ static NSArray *DYStorageHubSections(void) {
 static void DYStorageRefreshHubController(UIViewController *controller) {
     id viewModel = objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey);
     if (!viewModel) return;
-    DYStorageSetValue(viewModel, DYStorageHubSections(), @"sectionDataArray");
     DYStorageSearchCoordinator *coordinator =
         objc_getAssociatedObject(controller, kDYStorageSearchCoordinatorAssociationKey);
     if (coordinator) {
+        // The coordinator owns the current normal/search query. Let it build
+        // and install the model once instead of replacing it twice on every
+        // appearance of the organizer page.
         [coordinator refreshWithCurrentQuery];
-    } else if (controller.isViewLoaded) {
+        return;
+    }
+
+    DYStorageSetValue(viewModel, DYStorageHubSections(), @"sectionDataArray");
+    if (controller.isViewLoaded) {
         DYStorageReloadListsInView(controller.view, 5);
     }
 }
@@ -1062,6 +1073,7 @@ static void DYStorageInstallAvailableHooks(void);
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+        [[(UIViewController *)self viewIfLoaded] endEditing:YES];
         gDYStorageHubPageVisible = NO;
     }
 }

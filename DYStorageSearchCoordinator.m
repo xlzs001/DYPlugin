@@ -26,6 +26,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @interface DYStorageSearchCoordinator () <UITextFieldDelegate>
 @property (nonatomic, weak) UIViewController *controller;
 @property (nonatomic, weak) id viewModel;
+@property (nonatomic, weak) UITableView *tableView;
 @property (nonatomic, copy) DYStorageSearchSectionsProvider sectionsProvider;
 @property (nonatomic, strong) UIView *headerView;
 @property (nonatomic, strong) UIView *containerView;
@@ -36,6 +37,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic) UIEdgeInsets originalContentInset;
 @property (nonatomic) UIEdgeInsets originalIndicatorInset;
 @property (nonatomic) BOOL installedInsets;
+@property (nonatomic) NSUInteger pendingSearchGeneration;
 - (BOOL)installSearchHeader;
 - (NSString *)trimmedQuery;
 - (void)updatePlaceholderAnimated:(BOOL)animated;
@@ -60,6 +62,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     [self.controller view];
     UITableView *tableView = DYStorageSearchFindTableView(self.controller.view, 8);
     if (!tableView) return NO;
+    self.tableView = tableView;
 
     CGFloat width = MAX(CGRectGetWidth(tableView.bounds), CGRectGetWidth(self.controller.view.bounds));
     self.headerView = [[UIView alloc] initWithFrame:CGRectMake(0, 0, MAX(width, 0), 52)];
@@ -165,30 +168,59 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     if (!self.sectionsProvider || !self.viewModel) return;
     NSArray *sections = self.sectionsProvider([self trimmedQuery]) ?: @[];
     if (!DYStorageSearchSetValue(self.viewModel, sections, @"sectionDataArray")) return;
-    UITableView *tableView = DYStorageSearchFindTableView(self.controller.view, 8);
+    UITableView *tableView = self.tableView;
     [tableView reloadData];
 }
 
 - (void)searchTextDidChange:(__unused UITextField *)textField {
     [self updatePlaceholderAnimated:NO];
-    [self refreshWithCurrentQuery];
+    // Building native private-setting models for hundreds of catalog entries
+    // is deliberately kept off the per-keystroke hot path. Coalesce rapid
+    // edits so only the final query refreshes the table.
+    NSUInteger generation = ++self.pendingSearchGeneration;
+    __weak DYStorageSearchCoordinator *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        DYStorageSearchCoordinator *strongSelf = weakSelf;
+        if (!strongSelf || generation != strongSelf.pendingSearchGeneration) return;
+        if (!strongSelf.controller.viewIfLoaded.window) return;
+        [strongSelf refreshWithCurrentQuery];
+    });
 }
 
 - (void)updateLayout {
-    UITableView *tableView = DYStorageSearchFindTableView(self.controller.view, 8);
+    UITableView *tableView = self.tableView;
     if (!tableView || !self.headerView) return;
     UIView *superview = tableView.superview;
     if (!superview) return;
     CGRect tableFrame = [superview convertRect:tableView.frame toView:self.controller.view];
     CGFloat automaticTopInset = MAX(0, tableView.adjustedContentInset.top - tableView.contentInset.top);
     CGFloat width = CGRectGetWidth(tableView.bounds);
-    self.headerView.frame = CGRectMake(CGRectGetMinX(tableFrame), CGRectGetMinY(tableFrame) + automaticTopInset, width, 52);
-    self.containerView.frame = CGRectMake(16, 4, MAX(width - 32, 0), 44);
-    self.containerView.bounds = CGRectMake(0, 0, MAX(width - 32, 0), 44);
-    self.containerView.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.containerView.bounds cornerRadius:12].CGPath;
-    self.searchTextField.frame = self.containerView.bounds;
-    [self updatePlaceholderAnimated:NO];
-    [self.controller.view bringSubviewToFront:self.headerView];
+    CGRect headerFrame = CGRectMake(CGRectGetMinX(tableFrame),
+                                    CGRectGetMinY(tableFrame) + automaticTopInset,
+                                    width,
+                                    52);
+    CGRect containerFrame = CGRectMake(16, 4, MAX(width - 32, 0), 44);
+    BOOL headerChanged = !CGRectEqualToRect(self.headerView.frame, headerFrame);
+    BOOL containerChanged = !CGRectEqualToRect(self.containerView.frame, containerFrame) ||
+                            self.containerView.layer.shadowPath == NULL;
+
+    if (headerChanged) self.headerView.frame = headerFrame;
+    if (containerChanged) {
+        self.containerView.frame = containerFrame;
+        self.containerView.layer.shadowPath =
+            [UIBezierPath bezierPathWithRoundedRect:self.containerView.bounds cornerRadius:12].CGPath;
+        self.searchTextField.frame = self.containerView.bounds;
+        [self updatePlaceholderAnimated:NO];
+    }
+
+    // Reordering a subview on every layout pass can itself schedule additional
+    // layout work on some Douyin versions. Only reorder when another injected
+    // view has actually covered the search header.
+    if (self.headerView.superview == self.controller.view &&
+        self.controller.view.subviews.lastObject != self.headerView) {
+        [self.controller.view bringSubviewToFront:self.headerView];
+    }
 }
 
 - (void)textFieldDidBeginEditing:(__unused UITextField *)textField {
@@ -205,7 +237,9 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)dealloc {
-    UITableView *tableView = self.controller.isViewLoaded ? DYStorageSearchFindTableView(self.controller.view, 8) : nil;
+    ++_pendingSearchGeneration;
+    [_searchTextField removeTarget:self action:@selector(searchTextDidChange:) forControlEvents:UIControlEventEditingChanged];
+    UITableView *tableView = self.tableView;
     if (tableView && self.installedInsets) {
         tableView.contentInset = self.originalContentInset;
         tableView.scrollIndicatorInsets = self.originalIndicatorInset;
