@@ -56,6 +56,8 @@ jobs:
           build_version="${base_prefix}.${GITHUB_RUN_NUMBER}"
           sed -i '' -E "s/^Version:.*/Version: ${build_version}/" control
           sed -i '' -E "s#kDYStorageVersion = @\"[^\"]*\"#kDYStorageVersion = @\"${build_version}\"#" Tweak.xm
+          grep -Fxq "Version: ${build_version}" control
+          grep -Fq "kDYStorageVersion = @\"${build_version}\"" Tweak.xm
           echo "Building DYStorage version ${build_version}"
 
       - name: Clean packages directory
@@ -63,6 +65,7 @@ jobs:
 
       - name: Build Rootful
         run: |
+          rm -rf .theos
           make package SCHEME=rootful FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
           for f in packages/*.deb; do
             [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootful.deb"
@@ -70,6 +73,7 @@ jobs:
 
       - name: Build Rootless
         run: |
+          rm -rf .theos
           make package SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
           for f in packages/*.deb; do
             [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootless.deb"
@@ -77,6 +81,7 @@ jobs:
 
       - name: Build Roothide
         run: |
+          rm -rf .theos
           make package SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
           for f in packages/*.deb; do
             [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-roothide.deb"
