@@ -31,7 +31,7 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = DYStorage
 
-DYStorage_FILES = Tweak.xm DYStorageManager.m DYStorageDeveloperScanner.m
+DYStorage_FILES = Tweak.xm DYStorageManager.m DYStorageDeveloperScanner.m DYStorageSearchCatalog.m DYStorageSearchCoordinator.m
 DYStorage_CFLAGS = -fobjc-arc -fobjc-arc-exceptions -Wno-deprecated-declarations -Wno-unguarded-availability
 DYStorage_FRAMEWORKS = UIKit Foundation
 
