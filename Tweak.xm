@@ -646,11 +646,11 @@ static BOOL DYStorageLocateFeatureInTableViews(UIView *view,
                                         @"contentHeight": @(tableView.contentSize.height) },
                                      OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             NSInteger inspectedRows = 0;
-            for (NSInteger section = 0; section < rowCounts.count && inspectedRows < 600; section++) {
-                NSInteger rowCount = rowCounts[(NSUInteger)section].integerValue;
+            for (NSUInteger section = 0; section < rowCounts.count && inspectedRows < 600; section++) {
+                NSInteger rowCount = rowCounts[section].integerValue;
                 for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
                     @autoreleasepool {
-                        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+                        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:(NSInteger)section];
                         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
                         if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
                             @try {
