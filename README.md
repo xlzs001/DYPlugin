@@ -78,7 +78,9 @@ DYStorage 没有要求其他 tweak 链接它。下面的 Logos / Objective-C 示
 make package FINALPACKAGE=1
 ```
 
-GitHub Actions 会参考 DYYY 的构建方式，一次构建 Rootful、Rootless、RootHide 三种 `.deb`。Artifact `DYStorage-Packages` 下载后解压即可直接看到三个 `.deb`，不会再套一层项目 ZIP。工作流使用 Theos 官方 Rootless 模块与 `roothide/theos`，并在找不到 `.deb` 时明确失败，避免误报成功。
+GitHub Actions 会参考 DYYY 的构建方式，一次构建 Rootful、Rootless、RootHide 三种 `.deb`。Artifact 名称格式为 `DYStorage-北京时间戳`，下载后解压即可在根目录直接看到三个 `.deb` 和一个独立 `.dylib`，不会再套一层项目 ZIP。工作流使用 Theos 官方 Rootless 模块与 `roothide/theos`，并在找不到 `.deb` 时明确失败，避免误报成功。
+
+本次搜索定位、性能和稳定性改动见 [`RELEASE_NOTES.md`](RELEASE_NOTES.md)。
 
 ## 参考
 

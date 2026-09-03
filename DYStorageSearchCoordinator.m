@@ -144,7 +144,16 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (BOOL)isTopController {
-    return self.pageVisible && self.controller.viewIfLoaded.window != nil;
+    UIViewController *controller = self.controller;
+    if (!self.pageVisible || !controller.viewIfLoaded.window) return NO;
+    UINavigationController *navigationController = controller.navigationController;
+    if (!navigationController) return YES;
+    UIViewController *visibleController = navigationController.visibleViewController ?:
+                                          navigationController.topViewController;
+    for (UIViewController *candidate = controller; candidate; candidate = candidate.parentViewController) {
+        if (candidate == visibleController) return YES;
+    }
+    return NO;
 }
 
 - (void)installNavigationInterceptors {
@@ -296,7 +305,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
                    dispatch_get_main_queue(), ^{
         DYStorageSearchCoordinator *strongSelf = weakSelf;
         if (!strongSelf || generation != strongSelf.pendingSearchGeneration) return;
-        if (!strongSelf.controller.viewIfLoaded.window) return;
+        if (![strongSelf isTopController]) return;
         [strongSelf refreshWithCurrentQuery];
     });
 }
@@ -357,6 +366,21 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     return YES;
 }
 
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer
+       shouldReceiveTouch:(UITouch *)touch {
+    if (gestureRecognizer != self.searchBackGestureRecognizer) return YES;
+    UIView *touchView = touch.view;
+    if (!touchView) return NO;
+    BOOL inSearchHeader = self.headerView &&
+        (touchView == self.headerView || [touchView isDescendantOfView:self.headerView]);
+    BOOL inSourceTable = self.tableView &&
+        (touchView == self.tableView || [touchView isDescendantOfView:self.tableView]);
+    // Floating plug-ins may draw directly above the DYStorage controller without
+    // presenting another UIViewController. Ignore touches from those overlays
+    // so the organizer's full-width back gesture cannot swallow their controls.
+    return inSearchHeader || inSourceTable;
+}
+
 - (void)pageDidAppear {
     self.pageVisible = YES;
     [self installNavigationInterceptors];
@@ -364,6 +388,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)pageDidDisappear {
+    ++self.pendingSearchGeneration;
     self.pageVisible = NO;
     self.handlingSearchBackGesture = NO;
     [self restoreNavigationGestureState];
