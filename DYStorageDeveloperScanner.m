@@ -40,10 +40,77 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
     return [ignoredTitles containsObject:title];
 }
 
+static NSString *DYScannerControllerTitle(UIViewController *controller) {
+    NSString *title = controller.title;
+    if (title.length == 0) title = controller.navigationItem.title;
+    return [title stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static NSArray<UIWindow *> *DYScannerWindows(void) {
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    if (@available(iOS 13.0, *)) {
+        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+            if (![scene isKindOfClass:[UIWindowScene class]] || scene.activationState == UISceneActivationStateUnattached) continue;
+            [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+        }
+    }
+    if (windows.count == 0) [windows addObjectsFromArray:UIApplication.sharedApplication.windows];
+    return windows;
+}
+
+static UIViewController *DYScannerTopController(void) {
+    UIWindow *keyWindow = nil;
+    for (UIWindow *window in DYScannerWindows()) {
+        if (window.isKeyWindow) {
+            keyWindow = window;
+            break;
+        }
+        if (!keyWindow && !window.hidden && window.alpha > 0.0 && window.windowLevel == UIWindowLevelNormal) keyWindow = window;
+    }
+
+    UIViewController *controller = keyWindow.rootViewController;
+    BOOL advanced = YES;
+    while (controller && advanced) {
+        advanced = NO;
+        if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+            controller = controller.presentedViewController;
+            advanced = YES;
+            continue;
+        }
+        if ([controller isKindOfClass:[UINavigationController class]]) {
+            UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
+            if (visible && visible != controller) {
+                controller = visible;
+                advanced = YES;
+                continue;
+            }
+        }
+        if ([controller isKindOfClass:[UITabBarController class]]) {
+            UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
+            if (selected && selected != controller) {
+                controller = selected;
+                advanced = YES;
+            }
+        }
+    }
+    return controller;
+}
+
 @interface DYStorageDeveloperScanner ()
 @property (nonatomic, readwrite, getter=isScanning) BOOL scanning;
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *recordsByKey;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *visibleTextsByKey;
 @property (nonatomic, strong) NSDate *startedAt;
+@property (nonatomic, strong) NSTimer *scanTimer;
+@property (nonatomic, copy) NSString *activePluginTitle;
+- (NSArray<NSString *> *)pagePathForController:(UIViewController *)controller pluginTitle:(NSString **)pluginTitle;
+- (void)captureVisibleInterface;
+- (void)captureVisibleTextsInView:(UIView *)view
+                       controller:(UIViewController *)controller
+                            plugin:(NSString *)plugin
+                              path:(NSArray<NSString *> *)path
+                             depth:(NSInteger)depth;
+- (void)startScanTimer;
 @end
 
 @implementation DYStorageDeveloperScanner
@@ -61,27 +128,125 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
     self = [super init];
     if (self) {
         _recordsByKey = [NSMutableDictionary dictionary];
+        _visibleTextsByKey = [NSMutableDictionary dictionary];
     }
     return self;
 }
 
 - (NSUInteger)recordCount {
     @synchronized (self) {
-        return self.recordsByKey.count;
+        return self.recordsByKey.count + self.visibleTextsByKey.count;
     }
 }
 
 - (void)startNewScan {
     @synchronized (self) {
         [self.recordsByKey removeAllObjects];
+        [self.visibleTextsByKey removeAllObjects];
         self.startedAt = [NSDate date];
+        self.activePluginTitle = nil;
         self.scanning = YES;
     }
+    [self startScanTimer];
 }
 
 - (void)stopScanning {
     @synchronized (self) {
         self.scanning = NO;
+    }
+    [self.scanTimer invalidate];
+    self.scanTimer = nil;
+}
+
+- (void)startScanTimer {
+    if (![NSThread isMainThread]) {
+        __weak DYStorageDeveloperScanner *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf startScanTimer];
+        });
+        return;
+    }
+
+    [self.scanTimer invalidate];
+    __weak DYStorageDeveloperScanner *weakSelf = self;
+    self.scanTimer = [NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(__unused NSTimer *timer) {
+        [weakSelf captureVisibleInterface];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:self.scanTimer forMode:NSRunLoopCommonModes];
+    [self captureVisibleInterface];
+}
+
+- (void)captureVisibleInterface {
+    if (!self.isScanning) return;
+    UIViewController *controller = DYScannerTopController();
+    if (!controller || [controller isKindOfClass:[UIAlertController class]] ||
+        [controller isKindOfClass:[UIActivityViewController class]]) return;
+    if (DYScannerIgnoredPageTitle(DYScannerControllerTitle(controller))) return;
+
+    id viewModel = DYScannerValue(controller, @"viewModel");
+    if (viewModel) [self captureSettingsController:controller viewModel:viewModel];
+
+    NSString *pluginTitle = nil;
+    NSArray<NSString *> *pagePath = [self pagePathForController:controller pluginTitle:&pluginTitle];
+    if (pluginTitle.length == 0 || pagePath.count == 0) {
+        NSString *className = NSStringFromClass(controller.class);
+        if (className.length == 0) return;
+        pluginTitle = [@"未识别:" stringByAppendingString:className];
+        pagePath = @[ pluginTitle ];
+    }
+    if (DYScannerIgnoredPageTitle(pluginTitle)) return;
+
+    [self captureVisibleTextsInView:controller.view
+                         controller:controller
+                              plugin:pluginTitle
+                                path:pagePath
+                               depth:14];
+}
+
+- (void)captureVisibleTextsInView:(UIView *)view
+                       controller:(UIViewController *)controller
+                            plugin:(NSString *)plugin
+                              path:(NSArray<NSString *> *)path
+                             depth:(NSInteger)depth {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01 || view.window == nil) return;
+
+    NSString *text = nil;
+    if ([view isKindOfClass:[UILabel class]]) {
+        text = ((UILabel *)view).text;
+    } else if ([view isKindOfClass:[UIButton class]]) {
+        text = [(UIButton *)view titleForState:UIControlStateNormal];
+    } else if ([view isKindOfClass:[UISegmentedControl class]]) {
+        UISegmentedControl *control = (UISegmentedControl *)view;
+        NSMutableArray<NSString *> *segments = [NSMutableArray array];
+        for (NSInteger index = 0; index < control.numberOfSegments; index++) {
+            NSString *segment = [control titleForSegmentAtIndex:index];
+            if (segment.length) [segments addObject:segment];
+        }
+        text = [segments componentsJoinedByString:@" / "];
+    }
+
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (text.length > 0 && text.length <= 200 &&
+        ![text isEqualToString:@"DYStorage"] && ![text isEqualToString:@"插件收纳"]) {
+        NSString *pathKey = [path componentsJoinedByString:@"/"];
+        NSString *viewClass = NSStringFromClass(view.class) ?: @"";
+        NSString *recordKey = [NSString stringWithFormat:@"%@|%@|%@|%@", plugin, pathKey, viewClass, text];
+        NSDictionary *record = @{
+            @"plugin": plugin,
+            @"controllerClass": NSStringFromClass(controller.class) ?: @"",
+            @"pagePath": path,
+            @"pageTitle": DYScannerControllerTitle(controller) ?: @"",
+            @"text": text,
+            @"viewClass": viewClass,
+            @"accessibilityIdentifier": view.accessibilityIdentifier ?: @""
+        };
+        @synchronized (self) {
+            self.visibleTextsByKey[recordKey] = record;
+        }
+    }
+
+    for (UIView *subview in view.subviews) {
+        [self captureVisibleTextsInView:subview controller:controller plugin:plugin path:path depth:depth - 1];
     }
 }
 
@@ -90,25 +255,48 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
     NSArray<UIViewController *> *controllers = controller.navigationController.viewControllers;
     NSUInteger currentIndex = [controllers indexOfObjectIdenticalTo:controller];
     NSUInteger anchorIndex = NSNotFound;
+    BOOL anchoredToSettings = NO;
 
     if (currentIndex != NSNotFound) {
         for (NSUInteger index = 0; index < currentIndex; index++) {
-            NSString *title = controllers[index].title;
+            NSString *title = DYScannerControllerTitle(controllers[index]);
             if ([title isEqualToString:@"DYStorage"] || [title isEqualToString:@"设置"] || [title isEqualToString:@"插件收纳"]) {
                 anchorIndex = index;
+                anchoredToSettings = YES;
             }
         }
 
         NSUInteger startIndex = anchorIndex == NSNotFound ? 0 : anchorIndex + 1;
         for (NSUInteger index = startIndex; index <= currentIndex; index++) {
-            NSString *title = controllers[index].title;
+            NSString *title = DYScannerControllerTitle(controllers[index]);
             if (!DYScannerIgnoredPageTitle(title) && ![path.lastObject isEqualToString:title]) [path addObject:title];
         }
-    } else if (!DYScannerIgnoredPageTitle(controller.title)) {
-        [path addObject:controller.title];
+    } else {
+        NSString *title = DYScannerControllerTitle(controller);
+        if (!DYScannerIgnoredPageTitle(title)) [path addObject:title];
+    }
+
+    UIViewController *presenting = controller.navigationController.presentingViewController ?: controller.presentingViewController;
+    while (presenting && !anchoredToSettings) {
+        NSString *title = DYScannerControllerTitle(presenting);
+        if ([title isEqualToString:@"DYStorage"] || [title isEqualToString:@"设置"] || [title isEqualToString:@"插件收纳"]) {
+            anchoredToSettings = YES;
+            break;
+        }
+        presenting = presenting.presentingViewController;
     }
 
     NSString *rootTitle = path.firstObject;
+    @synchronized (self) {
+        if (anchoredToSettings && rootTitle.length) {
+            self.activePluginTitle = rootTitle;
+        } else if (self.activePluginTitle.length) {
+            rootTitle = self.activePluginTitle;
+            if (![path.firstObject isEqualToString:rootTitle]) [path insertObject:rootTitle atIndex:0];
+        } else if (rootTitle.length) {
+            self.activePluginTitle = rootTitle;
+        }
+    }
     if (pluginTitle) *pluginTitle = rootTitle;
     return path;
 }
@@ -169,10 +357,12 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
         NSString *path = [NSString stringWithUTF8String:imageName];
         if (path.length == 0 || [seenPaths containsObject:path]) continue;
 
-        BOOL tweakPath = [path containsString:@"/DynamicLibraries/"] ||
-                         [path containsString:@"/TweakInject/"] ||
-                         [path containsString:@"/Library/Tweaks/"];
-        if (!tweakPath) continue;
+        BOOL systemImage = [path hasPrefix:@"/System/Library/"] ||
+                           [path hasPrefix:@"/usr/lib/"] ||
+                           [path containsString:@"/System/Library/"];
+        BOOL loadableImage = [path.pathExtension.lowercaseString isEqualToString:@"dylib"] ||
+                             [path containsString:@".framework/"];
+        if (systemImage || !loadableImage) continue;
 
         [seenPaths addObject:path];
         [images addObject:@{
@@ -187,11 +377,17 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
 
 - (NSDictionary *)reportDictionary {
     NSArray<NSDictionary *> *records = nil;
+    NSArray<NSDictionary *> *visibleTexts = nil;
     NSDate *startedAt = nil;
     @synchronized (self) {
         records = [self.recordsByKey.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
             NSString *leftKey = [NSString stringWithFormat:@"%@|%@|%@", left[@"plugin"], left[@"pageTitle"], left[@"title"]];
             NSString *rightKey = [NSString stringWithFormat:@"%@|%@|%@", right[@"plugin"], right[@"pageTitle"], right[@"title"]];
+            return [leftKey localizedCaseInsensitiveCompare:rightKey];
+        }];
+        visibleTexts = [self.visibleTextsByKey.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+            NSString *leftKey = [NSString stringWithFormat:@"%@|%@|%@", left[@"plugin"], left[@"pageTitle"], left[@"text"]];
+            NSString *rightKey = [NSString stringWithFormat:@"%@|%@|%@", right[@"plugin"], right[@"pageTitle"], right[@"text"]];
             return [leftKey localizedCaseInsensitiveCompare:rightKey];
         }];
         startedAt = self.startedAt;
@@ -204,6 +400,7 @@ static BOOL DYScannerIgnoredPageTitle(NSString *title) {
         @"startedAt": startedAt ? [formatter stringFromDate:startedAt] : @"",
         @"systemVersion": UIDevice.currentDevice.systemVersion ?: @"",
         @"records": records ?: @[],
+        @"visibleTexts": visibleTexts ?: @[],
         @"loadedTweakImages": [self loadedTweakImages]
     };
 }
