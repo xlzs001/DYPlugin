@@ -34,6 +34,7 @@ static NSString *const kDYStorageRepositoryURL = @"https://github.com/xlzs001/DY
 static void *kDYStorageViewModelAssociationKey = &kDYStorageViewModelAssociationKey;
 static void *kDYStorageFallbackHiddenSectionKey = &kDYStorageFallbackHiddenSectionKey;
 static void *kDYStorageSearchCoordinatorAssociationKey = &kDYStorageSearchCoordinatorAssociationKey;
+static void *kDYStorageFeatureTableScanStateKey = &kDYStorageFeatureTableScanStateKey;
 
 static BOOL gDYStorageSettingsHookInstalled = NO;
 static BOOL gDYStorageHubHookInstalled = NO;
@@ -122,25 +123,25 @@ static UIViewController *DYStorageTopViewController(UIViewController *rootContro
     UIViewController *controller = rootController ?: DYStorageKeyWindow().rootViewController;
     if (!controller) return nil;
 
-    while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
-        controller = controller.presentedViewController;
-    }
-    while (YES) {
+    // Resolve one level at a time so a child of a navigation/tab controller
+    // can still have its own presented controller. The hard limit and identity
+    // checks prevent malformed private containers from producing an infinite
+    // loop on the main thread.
+    for (NSUInteger depth = 0; depth < 32; depth++) {
+        UIViewController *nextController = nil;
+        if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+            nextController = controller.presentedViewController;
+        }
         if ([controller isKindOfClass:[UINavigationController class]]) {
             UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
-            if (visible) {
-                controller = visible;
-                continue;
-            }
+            if (!nextController && visible) nextController = visible;
         }
         if ([controller isKindOfClass:[UITabBarController class]]) {
             UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
-            if (selected) {
-                controller = selected;
-                continue;
-            }
+            if (!nextController && selected) nextController = selected;
         }
-        break;
+        if (!nextController || nextController == controller) break;
+        controller = nextController;
     }
     return controller;
 }
@@ -266,12 +267,19 @@ static BOOL DYStorageIsXUUAssistantSectionWithItems(id section, NSArray *items) 
 
 static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
     if (![sections isKindOfClass:[NSArray class]]) return sections;
-    NSMutableArray *cleaned = [NSMutableArray arrayWithCapacity:sections.count];
-    for (id section in sections) {
-        if (DYStorageIsXUUAssistantSectionWithItems(section, DYStorageArrayValue(section, @"itemArray"))) continue;
-        [cleaned addObject:section];
+    NSMutableArray *cleaned = nil;
+    for (NSUInteger index = 0; index < sections.count; index++) {
+        id section = sections[index];
+        if (DYStorageIsXUUAssistantSectionWithItems(section, DYStorageArrayValue(section, @"itemArray"))) {
+            if (!cleaned) {
+                cleaned = [NSMutableArray arrayWithCapacity:sections.count - 1];
+                if (index > 0) [cleaned addObjectsFromArray:[sections subarrayWithRange:NSMakeRange(0, index)]];
+            }
+            continue;
+        }
+        if (cleaned) [cleaned addObject:section];
     }
-    return cleaned;
+    return cleaned ?: sections;
 }
 
 static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
@@ -598,27 +606,64 @@ static BOOL DYStorageLocateFeatureInTableViews(UIView *view,
     if ([view isKindOfClass:[UITableView class]]) {
         UITableView *tableView = (UITableView *)view;
         id<UITableViewDataSource> dataSource = tableView.dataSource;
-        NSInteger sectionCount = [dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]
-            ? [dataSource numberOfSectionsInTableView:tableView]
-            : 1;
+        NSInteger sectionCount = 0;
+        @try {
+            sectionCount = [dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]
+                ? [dataSource numberOfSectionsInTableView:tableView]
+                : (dataSource ? 1 : 0);
+        } @catch (__unused NSException *exception) {
+            sectionCount = 0;
+        }
         sectionCount = MAX(0, MIN(sectionCount, 80));
-        NSInteger inspectedRows = 0;
-        for (NSInteger section = 0; section < sectionCount && inspectedRows < 600; section++) {
-            NSInteger rowCount = [dataSource tableView:tableView numberOfRowsInSection:section];
-            rowCount = MAX(0, MIN(rowCount, 600 - inspectedRows));
-            for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
-                NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
-                UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-                if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
-                    @try {
-                        cell = [dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
-                    } @catch (__unused NSException *exception) {
-                        cell = nil;
+        NSMutableArray<NSNumber *> *rowCounts = [NSMutableArray arrayWithCapacity:(NSUInteger)sectionCount];
+        NSInteger totalRows = 0;
+        for (NSInteger section = 0; section < sectionCount && totalRows < 600; section++) {
+            NSInteger rowCount = 0;
+            @try {
+                rowCount = [dataSource tableView:tableView numberOfRowsInSection:section];
+            } @catch (__unused NSException *exception) {
+                rowCount = 0;
+            }
+            rowCount = MAX(0, MIN(rowCount, 600 - totalRows));
+            [rowCounts addObject:@(rowCount)];
+            totalRows += rowCount;
+        }
+
+        // A missing feature used to rebuild as many as 600 off-screen cells on
+        // every scheduled retry. Cache one complete scan for each navigation
+        // generation/table shape so a failed lookup cannot freeze the main
+        // thread after several seconds on a large plug-in page.
+        NSDictionary *previousState = objc_getAssociatedObject(tableView, kDYStorageFeatureTableScanStateKey);
+        BOOL alreadyScanned = totalRows > 0 &&
+            [previousState[@"generation"] unsignedIntegerValue] == gDYStorageFeatureNavigationGeneration &&
+            [previousState[@"rowCounts"] isEqual:rowCounts] &&
+            [previousState[@"contentHeight"] doubleValue] == tableView.contentSize.height;
+        if (!alreadyScanned && totalRows > 0) {
+            objc_setAssociatedObject(tableView,
+                                     kDYStorageFeatureTableScanStateKey,
+                                     @{ @"generation": @(gDYStorageFeatureNavigationGeneration),
+                                        @"rowCounts": [rowCounts copy],
+                                        @"contentHeight": @(tableView.contentSize.height) },
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSInteger inspectedRows = 0;
+            for (NSInteger section = 0; section < rowCounts.count && inspectedRows < 600; section++) {
+                NSInteger rowCount = rowCounts[(NSUInteger)section].integerValue;
+                for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
+                    @autoreleasepool {
+                        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+                        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                        if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
+                            @try {
+                                cell = [dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
+                            } @catch (__unused NSException *exception) {
+                                cell = nil;
+                            }
+                        }
+                        if (!cell || !DYStorageFindFeatureTextView(cell, nil, normalizedTitle, 10)) continue;
+                        DYStorageActivateOrHighlightTableRow(tableView, indexPath);
+                        return YES;
                     }
                 }
-                if (!cell || !DYStorageFindFeatureTextView(cell, nil, normalizedTitle, 10)) continue;
-                DYStorageActivateOrHighlightTableRow(tableView, indexPath);
-                return YES;
             }
         }
     }
@@ -691,8 +736,9 @@ static BOOL DYStorageLocateFeatureInSettingsController(UIViewController *control
             id section = sections[sectionIndex];
             NSString *candidateSection = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
             if (pass == 0 && normalizedSection.length && ![candidateSection isEqualToString:normalizedSection]) continue;
-            for (NSUInteger rowIndex = 0; rowIndex < DYStorageArrayValue(section, @"itemArray").count; rowIndex++) {
-                id item = DYStorageArrayValue(section, @"itemArray")[rowIndex];
+            NSArray *items = DYStorageArrayValue(section, @"itemArray");
+            for (NSUInteger rowIndex = 0; rowIndex < items.count; rowIndex++) {
+                id item = items[rowIndex];
                 if (![DYStorageNormalizedString(DYStorageStringValue(item, @"title")) isEqualToString:normalizedFeature]) continue;
                 matchedSection = (NSInteger)sectionIndex;
                 matchedRow = (NSInteger)rowIndex;
@@ -1409,6 +1455,9 @@ static void DYStorageInstallAvailableHooks(void);
         gDYStorageHubPageVisible = YES;
         DYStorageRefreshHubController((UIViewController *)self);
         DYStorageInstallAggregateSearch((UIViewController *)self);
+        DYStorageSearchCoordinator *coordinator =
+            objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+        [coordinator pageDidAppear];
         return;
     }
 
@@ -1441,6 +1490,9 @@ static void DYStorageInstallAvailableHooks(void);
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+        DYStorageSearchCoordinator *coordinator =
+            objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+        [coordinator pageDidDisappear];
         [[(UIViewController *)self viewIfLoaded] endEditing:YES];
         gDYStorageHubPageVisible = NO;
     }

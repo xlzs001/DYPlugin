@@ -13,6 +13,7 @@ typedef NSArray * _Nonnull (^DYStorageSearchSectionsProvider)(NSString * _Nonnul
 
 - (void)refreshWithCurrentQuery;
 - (void)updateLayout;
+- (void)pageDidAppear;
+- (void)pageDidDisappear;
 
 @end
-

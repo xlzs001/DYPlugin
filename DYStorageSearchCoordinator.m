@@ -22,7 +22,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     }
 }
 
-@interface DYStorageSearchCoordinator () <UITextFieldDelegate>
+@interface DYStorageSearchCoordinator () <UITextFieldDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, weak) UIViewController *controller;
 @property (nonatomic, weak) id viewModel;
 @property (nonatomic, weak) UITableView *tableView;
@@ -34,9 +34,20 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic) UIEdgeInsets originalIndicatorInset;
 @property (nonatomic) BOOL installedInsets;
 @property (nonatomic) NSUInteger pendingSearchGeneration;
+@property (nonatomic, weak) UINavigationController *navigationController;
+@property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *searchBackGestureRecognizer;
+@property (nonatomic) BOOL previousInteractivePopGestureEnabled;
+@property (nonatomic) BOOL hasStoredInteractivePopGestureEnabled;
 - (BOOL)installSearchHeader;
 - (NSString *)trimmedQuery;
+- (BOOL)isSearchInteractionActive;
+- (BOOL)isTopController;
 - (void)updateSupplementaryViewsForQuery:(NSString *)query;
+- (void)installNavigationInterceptors;
+- (void)updateNavigationGestureState;
+- (void)restoreNavigationGestureState;
+- (BOOL)handleBackNavigationRequest;
+- (void)handleSearchBackGesture:(UIScreenEdgePanGestureRecognizer *)gestureRecognizer;
 - (void)searchTextDidChange:(UITextField *)textField;
 @end
 
@@ -114,12 +125,91 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     indicatorInset.top += CGRectGetHeight(self.headerView.bounds);
     tableView.scrollIndicatorInsets = indicatorInset;
     self.installedInsets = YES;
+    [self installNavigationInterceptors];
     [self updateLayout];
     return YES;
 }
 
 - (NSString *)trimmedQuery {
     return [self.searchTextField.text ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (BOOL)isSearchInteractionActive {
+    return self.searchTextField.isFirstResponder || [self trimmedQuery].length > 0;
+}
+
+- (BOOL)isTopController {
+    UINavigationController *navigationController = self.controller.navigationController;
+    return navigationController && navigationController.topViewController == self.controller;
+}
+
+- (void)installNavigationInterceptors {
+    UIViewController *controller = self.controller;
+    if (!controller) return;
+
+    UINavigationController *navigationController = controller.navigationController;
+    if (self.navigationController != navigationController) {
+        [self restoreNavigationGestureState];
+        self.navigationController = navigationController;
+    }
+
+    if (!self.searchBackGestureRecognizer) {
+        UIScreenEdgePanGestureRecognizer *gestureRecognizer =
+            [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self
+                                                               action:@selector(handleSearchBackGesture:)];
+        gestureRecognizer.edges = UIRectEdgeLeft;
+        gestureRecognizer.delegate = self;
+        gestureRecognizer.enabled = NO;
+        [controller.view addGestureRecognizer:gestureRecognizer];
+        self.searchBackGestureRecognizer = gestureRecognizer;
+    }
+    [self updateNavigationGestureState];
+}
+
+- (void)updateNavigationGestureState {
+    UINavigationController *navigationController = self.controller.navigationController;
+    UIGestureRecognizer *interactivePopGesture = navigationController.interactivePopGestureRecognizer;
+    BOOL shouldIntercept = [self isTopController] && [self isSearchInteractionActive];
+
+    self.searchBackGestureRecognizer.enabled = shouldIntercept;
+    if (shouldIntercept) {
+        if (!self.hasStoredInteractivePopGestureEnabled && interactivePopGesture) {
+            self.previousInteractivePopGestureEnabled = interactivePopGesture.enabled;
+            self.hasStoredInteractivePopGestureEnabled = YES;
+        }
+        interactivePopGesture.enabled = NO;
+    } else {
+        [self restoreNavigationGestureState];
+    }
+}
+
+- (void)restoreNavigationGestureState {
+    if (self.hasStoredInteractivePopGestureEnabled) {
+        self.navigationController.interactivePopGestureRecognizer.enabled =
+            self.previousInteractivePopGestureEnabled;
+        self.hasStoredInteractivePopGestureEnabled = NO;
+    }
+    self.searchBackGestureRecognizer.enabled = NO;
+}
+
+- (BOOL)handleBackNavigationRequest {
+    if (![self isTopController] || ![self isSearchInteractionActive]) return NO;
+
+    // The first left-edge swipe exits search and restores the complete hub.
+    // A following swipe is handled by UINavigationController and returns to
+    // Douyin settings, matching the two visible page levels.
+    ++self.pendingSearchGeneration;
+    self.searchTextField.text = @"";
+    [self.searchTextField resignFirstResponder];
+    [self refreshWithCurrentQuery];
+    [self updateNavigationGestureState];
+    return YES;
+}
+
+- (void)handleSearchBackGesture:(UIScreenEdgePanGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer.state == UIGestureRecognizerStateBegan) {
+        [self handleBackNavigationRequest];
+    }
 }
 
 - (void)updateSupplementaryViewsForQuery:(NSString *)query {
@@ -143,6 +233,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 
 - (void)searchTextDidChange:(__unused UITextField *)textField {
     [self updateSupplementaryViewsForQuery:[self trimmedQuery]];
+    [self updateNavigationGestureState];
     // Building native private-setting models for hundreds of catalog entries
     // is deliberately kept off the per-keystroke hot path. Coalesce rapid
     // edits so only the final query refreshes the table.
@@ -196,8 +287,34 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     return YES;
 }
 
+- (void)textFieldDidBeginEditing:(__unused UITextField *)textField {
+    [self updateNavigationGestureState];
+}
+
+- (void)textFieldDidEndEditing:(__unused UITextField *)textField {
+    [self updateNavigationGestureState];
+}
+
+- (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
+    if (gestureRecognizer == self.searchBackGestureRecognizer) {
+        return [self isTopController] && [self isSearchInteractionActive];
+    }
+    return YES;
+}
+
+- (void)pageDidAppear {
+    [self installNavigationInterceptors];
+    [self updateNavigationGestureState];
+}
+
+- (void)pageDidDisappear {
+    [self restoreNavigationGestureState];
+}
+
 - (void)dealloc {
     ++_pendingSearchGeneration;
+    [self restoreNavigationGestureState];
+    [_controller.viewIfLoaded removeGestureRecognizer:_searchBackGestureRecognizer];
     [_searchTextField removeTarget:self action:@selector(searchTextDidChange:) forControlEvents:UIControlEventEditingChanged];
     UITableView *tableView = self.tableView;
     if (tableView && self.installedInsets) {
