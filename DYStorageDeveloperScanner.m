@@ -58,17 +58,8 @@ static NSArray<UIWindow *> *DYScannerWindows(void) {
     return windows;
 }
 
-static UIViewController *DYScannerTopController(void) {
-    UIWindow *keyWindow = nil;
-    for (UIWindow *window in DYScannerWindows()) {
-        if (window.isKeyWindow) {
-            keyWindow = window;
-            break;
-        }
-        if (!keyWindow && !window.hidden && window.alpha > 0.0 && window.windowLevel == UIWindowLevelNormal) keyWindow = window;
-    }
-
-    UIViewController *controller = keyWindow.rootViewController;
+static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
+    UIViewController *controller = window.rootViewController;
     BOOL advanced = YES;
     while (controller && advanced) {
         advanced = NO;
@@ -103,6 +94,8 @@ static UIViewController *DYScannerTopController(void) {
 @property (nonatomic, strong) NSDate *startedAt;
 @property (nonatomic, strong) NSTimer *scanTimer;
 @property (nonatomic, copy) NSString *activePluginTitle;
+@property (nonatomic) NSUInteger scanTickCount;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSDictionary *> *controllerSamplesByKey;
 - (NSArray<NSString *> *)pagePathForController:(UIViewController *)controller pluginTitle:(NSString **)pluginTitle;
 - (void)captureVisibleInterface;
 - (void)captureVisibleTextsInView:(UIView *)view
@@ -129,6 +122,7 @@ static UIViewController *DYScannerTopController(void) {
     if (self) {
         _recordsByKey = [NSMutableDictionary dictionary];
         _visibleTextsByKey = [NSMutableDictionary dictionary];
+        _controllerSamplesByKey = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -143,8 +137,10 @@ static UIViewController *DYScannerTopController(void) {
     @synchronized (self) {
         [self.recordsByKey removeAllObjects];
         [self.visibleTextsByKey removeAllObjects];
+        [self.controllerSamplesByKey removeAllObjects];
         self.startedAt = [NSDate date];
         self.activePluginTitle = nil;
+        self.scanTickCount = 0;
         self.scanning = YES;
     }
     [self startScanTimer];
@@ -156,6 +152,14 @@ static UIViewController *DYScannerTopController(void) {
     }
     [self.scanTimer invalidate];
     self.scanTimer = nil;
+}
+
+- (void)selectPluginWithTitle:(NSString *)pluginTitle {
+    NSString *trimmed = [pluginTitle stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return;
+    @synchronized (self) {
+        self.activePluginTitle = trimmed;
+    }
 }
 
 - (void)startScanTimer {
@@ -178,29 +182,68 @@ static UIViewController *DYScannerTopController(void) {
 
 - (void)captureVisibleInterface {
     if (!self.isScanning) return;
-    UIViewController *controller = DYScannerTopController();
-    if (!controller || [controller isKindOfClass:[UIAlertController class]] ||
-        [controller isKindOfClass:[UIActivityViewController class]]) return;
-    if (DYScannerIgnoredPageTitle(DYScannerControllerTitle(controller))) return;
-
-    id viewModel = DYScannerValue(controller, @"viewModel");
-    if (viewModel) [self captureSettingsController:controller viewModel:viewModel];
-
-    NSString *pluginTitle = nil;
-    NSArray<NSString *> *pagePath = [self pagePathForController:controller pluginTitle:&pluginTitle];
-    if (pluginTitle.length == 0 || pagePath.count == 0) {
-        NSString *className = NSStringFromClass(controller.class);
-        if (className.length == 0) return;
-        pluginTitle = [@"未识别:" stringByAppendingString:className];
-        pagePath = @[ pluginTitle ];
+    NSArray<UIWindow *> *windows = DYScannerWindows();
+    @synchronized (self) {
+        self.scanTickCount += 1;
     }
-    if (DYScannerIgnoredPageTitle(pluginTitle)) return;
 
-    [self captureVisibleTextsInView:controller.view
-                         controller:controller
-                              plugin:pluginTitle
-                                path:pagePath
-                               depth:14];
+    for (UIWindow *window in windows) {
+        if (!window || window.hidden || window.alpha < 0.01) continue;
+        NSString *windowClass = NSStringFromClass(window.class) ?: @"";
+        if ([windowClass containsString:@"Keyboard"] || [windowClass containsString:@"TextEffects"] ||
+            [windowClass containsString:@"StatusBar"]) continue;
+
+        UIViewController *controller = DYScannerTopControllerForWindow(window);
+        NSString *controllerClass = NSStringFromClass(controller.class) ?: @"";
+        NSString *pageTitle = DYScannerControllerTitle(controller) ?: @"";
+        NSString *sampleKey = [NSString stringWithFormat:@"%@|%@|%@", windowClass, controllerClass, pageTitle];
+        @synchronized (self) {
+            self.controllerSamplesByKey[sampleKey] = @{
+                @"windowClass": windowClass,
+                @"windowLevel": @(window.windowLevel),
+                @"isKeyWindow": @(window.isKeyWindow),
+                @"controllerClass": controllerClass,
+                @"pageTitle": pageTitle
+            };
+        }
+
+        if ([controller isKindOfClass:[UIAlertController class]] ||
+            [controller isKindOfClass:[UIActivityViewController class]]) continue;
+
+        id viewModel = DYScannerValue(controller, @"viewModel");
+        if (controller && viewModel) [self captureSettingsController:controller viewModel:viewModel];
+
+        NSString *pluginTitle = nil;
+        NSArray<NSString *> *pagePath = controller
+            ? [self pagePathForController:controller pluginTitle:&pluginTitle]
+            : @[];
+        NSString *activePlugin = nil;
+        @synchronized (self) {
+            activePlugin = self.activePluginTitle;
+        }
+        if (activePlugin.length) {
+            pluginTitle = activePlugin;
+            if (![pagePath.firstObject isEqualToString:activePlugin]) {
+                NSMutableArray<NSString *> *adjustedPath = [NSMutableArray arrayWithObject:activePlugin];
+                if (pagePath.count) [adjustedPath addObjectsFromArray:pagePath];
+                pagePath = adjustedPath;
+            }
+        }
+
+        if (pluginTitle.length == 0 || pagePath.count == 0) {
+            NSString *fallbackName = controllerClass.length ? controllerClass : windowClass;
+            if (fallbackName.length == 0) continue;
+            pluginTitle = [@"未识别:" stringByAppendingString:fallbackName];
+            pagePath = @[ pluginTitle ];
+        }
+        if (!activePlugin.length && DYScannerIgnoredPageTitle(pageTitle)) continue;
+
+        [self captureVisibleTextsInView:window
+                             controller:controller
+                                  plugin:pluginTitle
+                                    path:pagePath
+                                   depth:18];
+    }
 }
 
 - (void)captureVisibleTextsInView:(UIView *)view
@@ -208,7 +251,8 @@ static UIViewController *DYScannerTopController(void) {
                             plugin:(NSString *)plugin
                               path:(NSArray<NSString *> *)path
                              depth:(NSInteger)depth {
-    if (!view || depth < 0 || view.hidden || view.alpha < 0.01 || view.window == nil) return;
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return;
+    if (![view isKindOfClass:[UIWindow class]] && view.window == nil) return;
 
     NSString *text = nil;
     if ([view isKindOfClass:[UILabel class]]) {
@@ -223,6 +267,10 @@ static UIViewController *DYScannerTopController(void) {
             if (segment.length) [segments addObject:segment];
         }
         text = [segments componentsJoinedByString:@" / "];
+    }
+    if (text.length == 0 && ![view isKindOfClass:[UITextField class]] &&
+        ![view isKindOfClass:[UITextView class]]) {
+        text = view.accessibilityLabel;
     }
 
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -293,8 +341,6 @@ static UIViewController *DYScannerTopController(void) {
         } else if (self.activePluginTitle.length) {
             rootTitle = self.activePluginTitle;
             if (![path.firstObject isEqualToString:rootTitle]) [path insertObject:rootTitle atIndex:0];
-        } else if (rootTitle.length) {
-            self.activePluginTitle = rootTitle;
         }
     }
     if (pluginTitle) *pluginTitle = rootTitle;
@@ -359,7 +405,8 @@ static UIViewController *DYScannerTopController(void) {
 
         BOOL systemImage = [path hasPrefix:@"/System/Library/"] ||
                            [path hasPrefix:@"/usr/lib/"] ||
-                           [path containsString:@"/System/Library/"];
+                           [path containsString:@"/System/Library/"] ||
+                           [path containsString:@"/usr/lib/"];
         BOOL loadableImage = [path.pathExtension.lowercaseString isEqualToString:@"dylib"] ||
                              [path containsString:@".framework/"];
         if (systemImage || !loadableImage) continue;
@@ -378,6 +425,8 @@ static UIViewController *DYScannerTopController(void) {
 - (NSDictionary *)reportDictionary {
     NSArray<NSDictionary *> *records = nil;
     NSArray<NSDictionary *> *visibleTexts = nil;
+    NSArray<NSDictionary *> *controllerSamples = nil;
+    NSUInteger scanTickCount = 0;
     NSDate *startedAt = nil;
     @synchronized (self) {
         records = [self.recordsByKey.allValues sortedArrayUsingComparator:^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
@@ -390,6 +439,8 @@ static UIViewController *DYScannerTopController(void) {
             NSString *rightKey = [NSString stringWithFormat:@"%@|%@|%@", right[@"plugin"], right[@"pageTitle"], right[@"text"]];
             return [leftKey localizedCaseInsensitiveCompare:rightKey];
         }];
+        controllerSamples = self.controllerSamplesByKey.allValues;
+        scanTickCount = self.scanTickCount;
         startedAt = self.startedAt;
     }
 
@@ -399,6 +450,8 @@ static UIViewController *DYScannerTopController(void) {
         @"generatedAt": [formatter stringFromDate:[NSDate date]],
         @"startedAt": startedAt ? [formatter stringFromDate:startedAt] : @"",
         @"systemVersion": UIDevice.currentDevice.systemVersion ?: @"",
+        @"scanTickCount": @(scanTickCount),
+        @"controllerSamples": controllerSamples ?: @[],
         @"records": records ?: @[],
         @"visibleTexts": visibleTexts ?: @[],
         @"loadedTweakImages": [self loadedTweakImages]
