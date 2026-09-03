@@ -38,6 +38,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *searchBackGestureRecognizer;
 @property (nonatomic) BOOL previousInteractivePopGestureEnabled;
 @property (nonatomic) BOOL hasStoredInteractivePopGestureEnabled;
+@property (nonatomic) BOOL handlingSearchBackGesture;
 - (BOOL)installSearchHeader;
 - (NSString *)trimmedQuery;
 - (BOOL)isSearchInteractionActive;
@@ -169,7 +170,8 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (void)updateNavigationGestureState {
     UINavigationController *navigationController = self.controller.navigationController;
     UIGestureRecognizer *interactivePopGesture = navigationController.interactivePopGestureRecognizer;
-    BOOL shouldIntercept = [self isTopController] && [self isSearchInteractionActive];
+    BOOL shouldIntercept = [self isTopController] &&
+        (self.handlingSearchBackGesture || [self isSearchInteractionActive]);
 
     self.searchBackGestureRecognizer.enabled = shouldIntercept;
     if (shouldIntercept) {
@@ -207,8 +209,29 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)handleSearchBackGesture:(UIScreenEdgePanGestureRecognizer *)gestureRecognizer {
-    if (gestureRecognizer.state == UIGestureRecognizerStateBegan) {
-        [self handleBackNavigationRequest];
+    switch (gestureRecognizer.state) {
+        case UIGestureRecognizerStateBegan:
+            // Keep the system pop gesture disabled until this complete touch
+            // sequence ends. Re-enabling it while the finger was still moving
+            // allowed the same swipe to clear search and pop the hub at once.
+            self.handlingSearchBackGesture = YES;
+            if (![self handleBackNavigationRequest]) {
+                self.handlingSearchBackGesture = NO;
+                [self updateNavigationGestureState];
+            }
+            break;
+        case UIGestureRecognizerStateEnded:
+        case UIGestureRecognizerStateCancelled:
+        case UIGestureRecognizerStateFailed: {
+            self.handlingSearchBackGesture = NO;
+            __weak DYStorageSearchCoordinator *weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf updateNavigationGestureState];
+            });
+            break;
+        }
+        default:
+            break;
     }
 }
 
@@ -308,6 +331,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)pageDidDisappear {
+    self.handlingSearchBackGesture = NO;
     [self restoreNavigationGestureState];
 }
 

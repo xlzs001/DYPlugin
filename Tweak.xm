@@ -500,6 +500,9 @@ static NSUInteger gDYStorageFeatureNavigationGeneration = 0;
 static __weak UIViewController *gDYStoragePendingSourceController = nil;
 static NSString *gDYStoragePendingFeatureSection = nil;
 static NSString *gDYStoragePendingFeatureTitle = nil;
+static NSArray<NSString *> *gDYStoragePendingFeatureRoute = nil;
+static NSUInteger gDYStoragePendingFeatureRouteIndex = 0;
+static __weak UIViewController *gDYStorageLastRouteController = nil;
 
 static void DYStoragePulseHighlightView(UIView *view) {
     if (!view) return;
@@ -808,12 +811,124 @@ static BOOL DYStoragePrepareNativePluginSearch(UIViewController *controller, NSS
     return YES;
 }
 
+static NSArray<NSString *> *DYStorageNavigationRouteForFeature(NSString *plugin,
+                                                                NSDictionary *feature) {
+    id explicitRoute = feature[@"route"];
+    if ([explicitRoute isKindOfClass:[NSString class]] && [explicitRoute length]) {
+        return @[ explicitRoute ];
+    }
+    if ([explicitRoute isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSString *> *route = [NSMutableArray array];
+        for (id component in (NSArray *)explicitRoute) {
+            if ([component isKindOfClass:[NSString class]] && [component length]) {
+                [route addObject:component];
+            }
+        }
+        if (route.count) return route;
+    }
+
+    // The installed DYYY build constructs all search models while remaining on
+    // its root controller, so the scanner cannot observe the pushed page in
+    // pagePath. These section-to-page relationships are the real root menu
+    // callbacks used by DYYY and let DYStorage enter the correct second level
+    // before locating a switch, slider, or action row.
+    if (![plugin isEqualToString:@"DYYY"]) return @[];
+    NSString *section = feature[@"section"];
+    if (!section.length || [section isEqualToString:@"功能"] ||
+        [section isEqualToString:@"清理"] || [section isEqualToString:@"备份"] ||
+        [section isEqualToString:@"关于"]) {
+        return @[];
+    }
+
+    static NSDictionary<NSString *, NSString *> *pageBySection = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableDictionary<NSString *, NSString *> *mapping = [NSMutableDictionary dictionary];
+        NSDictionary<NSString *, NSArray<NSString *> *> *sectionsByPage = @{
+            @"基本设置": @[ @"外观设置", @"视频播放", @"播放控制", @"进度显示",
+                            @"弹幕", @"属地标签", @"直播", @"画质帧率", @"杂项设置",
+                            @"过滤与屏蔽", @"推荐过滤", @"隐私", @"二次确认", @"广告与弹窗" ],
+            @"界面设置": @[ @"首页布局", @"透明度设置", @"缩放与大小", @"标题自定义", @"图标自定义" ],
+            @"隐藏设置": @[ @"主界面元素", @"视频播放界面", @"侧边栏元素", @"消息页与我的页",
+                            @"提示与位置信息", @"直播间界面", @"隐藏面板功能", @"隐藏长按评论功能" ],
+            @"顶栏移除": @[ @"顶栏选项" ],
+            @"增强设置": @[ @"长按面板设置", @"媒体保存", @"交互增强", @"账号与登录", @"ABTest" ],
+            @"悬浮按钮": @[ @"快捷倍速", @"一键清屏" ]
+        };
+        [sectionsByPage enumerateKeysAndObjectsUsingBlock:^(NSString *page,
+                                                            NSArray<NSString *> *sections,
+                                                            __unused BOOL *stop) {
+            for (NSString *name in sections) mapping[name] = page;
+        }];
+        pageBySection = [mapping copy];
+    });
+    NSString *page = pageBySection[section];
+    return page.length ? @[ page ] : @[];
+}
+
+static BOOL DYStorageInvokeSettingsNavigationItem(UIViewController *controller,
+                                                   NSString *title) {
+    if (!controller || !title.length ||
+        objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey)) return NO;
+    NSString *normalizedTitle = DYStorageNormalizedString(title);
+    id viewModel = DYStorageValue(controller, @"viewModel");
+    for (id section in DYStorageArrayValue(viewModel, @"sectionDataArray")) {
+        for (id item in DYStorageArrayValue(section, @"itemArray")) {
+            if (![DYStorageNormalizedString(DYStorageStringValue(item, @"title"))
+                    isEqualToString:normalizedTitle]) continue;
+            NSNumber *cellType = DYStorageValue(item, @"cellType");
+            id actionObject = DYStorageValue(item, @"cellTappedBlock");
+            BOOL navigationCell = ![cellType isKindOfClass:[NSNumber class]] ||
+                cellType.integerValue == 26;
+            if (!navigationCell || ![NSStringFromClass([actionObject class]) containsString:@"Block"]) continue;
+            DYStorageAction action = [(DYStorageAction)actionObject copy];
+            @try {
+                action();
+                return YES;
+            } @catch (__unused NSException *exception) {
+                return NO;
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL DYStorageFeatureRouteIsReady(UIViewController *controller,
+                                         UIViewController *sourceController) {
+    NSArray<NSString *> *route = gDYStoragePendingFeatureRoute;
+    if (route.count == 0) return YES;
+    if (!controller || controller == sourceController) return NO;
+
+    while (gDYStoragePendingFeatureRouteIndex < route.count) {
+        NSString *routeTitle = route[gDYStoragePendingFeatureRouteIndex];
+        NSString *controllerTitle = DYStorageNormalizedString(controller.title ?: controller.navigationItem.title);
+        if ([controllerTitle isEqualToString:DYStorageNormalizedString(routeTitle)]) {
+            gDYStoragePendingFeatureRouteIndex += 1;
+            gDYStorageLastRouteController = nil;
+            continue;
+        }
+        if (controller == gDYStorageLastRouteController) return NO;
+        if (!DYStorageInvokeSettingsNavigationItem(controller, routeTitle)) return NO;
+        gDYStoragePendingFeatureRouteIndex += 1;
+        gDYStorageLastRouteController = controller;
+        return NO;
+    }
+
+    // A route action normally pushes/presents the destination asynchronously.
+    // Do not search the root model during that transition: it may contain a
+    // prebuilt global index and would falsely report the feature as resolved.
+    return controller != gDYStorageLastRouteController;
+}
+
 static void DYStorageClearPendingFeatureNavigation(NSUInteger generation) {
     if (generation != gDYStorageFeatureNavigationGeneration) return;
     ++gDYStorageFeatureNavigationGeneration;
     gDYStoragePendingSourceController = nil;
     gDYStoragePendingFeatureSection = nil;
     gDYStoragePendingFeatureTitle = nil;
+    gDYStoragePendingFeatureRoute = nil;
+    gDYStoragePendingFeatureRouteIndex = 0;
+    gDYStorageLastRouteController = nil;
 }
 
 static BOOL DYStorageResolveFeatureInController(UIViewController *controller,
@@ -821,6 +936,7 @@ static BOOL DYStorageResolveFeatureInController(UIViewController *controller,
                                                 NSString *section,
                                                 NSString *title) {
     if (!controller || controller == sourceController) return NO;
+    if (!DYStorageFeatureRouteIsReady(controller, sourceController)) return NO;
     if (DYStorageLocateFeatureInSettingsController(controller, section, title)) return YES;
     // DYYY builds its real search entries from the original item models. Feed
     // the requested title into that native search first; a following pass can
@@ -867,6 +983,7 @@ static void DYStorageResolvePendingFeatureForController(UIViewController *contro
 
 static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
                                           DYStorageAction openPlugin,
+                                          NSArray<NSString *> *route,
                                           NSString *section,
                                           NSString *title) {
     if (!openPlugin) return;
@@ -874,6 +991,9 @@ static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
     gDYStoragePendingSourceController = sourceController;
     gDYStoragePendingFeatureSection = [section copy];
     gDYStoragePendingFeatureTitle = [title copy];
+    gDYStoragePendingFeatureRoute = [route copy] ?: @[];
+    gDYStoragePendingFeatureRouteIndex = 0;
+    gDYStorageLastRouteController = nil;
     openPlugin();
 
     __weak UIViewController *weakSourceController = sourceController;
@@ -910,6 +1030,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
         for (NSDictionary *feature in catalogEntry[@"features"]) {
             NSString *title = feature[@"title"];
             NSString *section = feature[@"section"] ?: @"功能";
+            NSArray<NSString *> *route = DYStorageNavigationRouteForFeature(plugin, feature);
             // DYYY's scanned model contained XUU's independently injected root
             // entry. It is not a DYYY feature and must not appear unless the
             // actual assistant plug-in is installed as its own catalog target.
@@ -932,7 +1053,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
             NSString *identifier = [NSString stringWithFormat:@"com.xlzs001.dystorage.search.%lu", (unsigned long)resultIndex++];
             __weak UIViewController *weakSourceController = sourceController;
             DYStorageAction resultAction = ^{
-                DYStorageOpenAndLocateFeature(weakSourceController, action, section, title);
+                DYStorageOpenAndLocateFeature(weakSourceController, action, route, section, title);
             };
             id resultItem = DYStorageMakeItem(identifier,
                                               title ?: @"未命名功能",
