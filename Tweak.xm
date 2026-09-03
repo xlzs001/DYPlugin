@@ -531,7 +531,7 @@ static NSArray *DYStorageHubSections(void) {
                                            if (!activeScanner.isScanning) {
                                                [activeScanner startNewScan];
                                                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开发者扫描已开始"
-                                                                                                              message:@"请依次进入每个已收纳插件及其所有子页面。扫描只记录设置项名称、页面位置和已加载的插件 dylib；完成后返回 DYStorage，点击“结束扫描并导出”。"
+                                                                                                              message:@"请一次只打开一个插件，展开所有分类并缓慢滚动到底部；每个页面停留约 1 秒。悬浮窗会优先扫描最上层窗口。完成后返回 DYStorage，点击“结束扫描并导出”。"
                                                                                                        preferredStyle:UIAlertControllerStyleAlert];
                                                [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
                                                [presenter presentViewController:alert animated:YES completion:nil];
