@@ -457,17 +457,37 @@ static void DYStorageInstallAboutFooter(UIViewController *controller) {
 
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
+    DYStorageDeveloperScanner *scanner = [DYStorageDeveloperScanner sharedScanner];
     NSArray *capturedItems = [manager capturedSettingsItems];
     NSArray<DYStorageRegistration *> *registeredPlugins = [manager registeredPlugins];
     NSMutableArray *sections = [NSMutableArray array];
     NSMutableSet<NSString *> *seenKeys = [NSMutableSet set];
 
     if (capturedItems.count) {
+        NSMutableArray *displayItems = [NSMutableArray arrayWithCapacity:capturedItems.count];
         for (id item in capturedItems) {
             NSString *key = DYStorageItemKey(item);
             if (key.length) [seenKeys addObject:key];
+
+            id displayItem = item;
+            if (scanner.isScanning) {
+                NSString *title = DYStorageStringValue(item, @"title") ?: @"未命名插件";
+                NSString *identifier = DYStorageStringValue(item, @"identifier") ?: [@"scan:" stringByAppendingString:title];
+                NSString *detail = DYStorageStringValue(item, @"detail") ?: @"";
+                NSString *iconName = DYStorageStringValue(item, @"svgIconImageName") ?: DYStorageStringValue(item, @"iconImageName");
+                id actionObject = DYStorageValue(item, @"cellTappedBlock");
+                if ([NSStringFromClass([actionObject class]) containsString:@"Block"]) {
+                    DYStorageAction originalAction = (DYStorageAction)[actionObject copy];
+                    id wrappedItem = DYStorageMakeItem(identifier, title, detail, iconName, ^{
+                        [[DYStorageDeveloperScanner sharedScanner] selectPluginWithTitle:title];
+                        originalAction();
+                    });
+                    if (wrappedItem) displayItem = wrappedItem;
+                }
+            }
+            [displayItems addObject:displayItem];
         }
-        id capturedSection = DYStorageMakeSection(kDYStorageHubContentIdentifier, @"已收纳的插件", capturedItems);
+        id capturedSection = DYStorageMakeSection(kDYStorageHubContentIdentifier, @"已收纳的插件", displayItems);
         if (capturedSection) [sections addObject:capturedSection];
     }
 
@@ -485,6 +505,9 @@ static NSArray *DYStorageHubSections(void) {
                                     registration.version,
                                     @"ic_gearsimplify_outlined_20",
                                     ^{
+                                        if ([DYStorageDeveloperScanner sharedScanner].isScanning) {
+                                            [[DYStorageDeveloperScanner sharedScanner] selectPluginWithTitle:weakRegistration.title];
+                                        }
                                         DYStorageOpenRegistration(weakRegistration);
                                     });
         if (item) [registeredItems addObject:item];
@@ -494,7 +517,6 @@ static NSArray *DYStorageHubSections(void) {
         if (registeredSection) [sections addObject:registeredSection];
     }
 
-    DYStorageDeveloperScanner *scanner = [DYStorageDeveloperScanner sharedScanner];
     NSString *scannerTitle = scanner.isScanning ? @"结束扫描并导出" : @"开发者扫描";
     NSString *scannerDetail = scanner.isScanning
         ? [NSString stringWithFormat:@"已记录 %lu 个功能，点击生成 JSON", (unsigned long)scanner.recordCount]

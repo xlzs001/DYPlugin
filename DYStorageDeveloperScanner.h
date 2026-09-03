@@ -13,6 +13,7 @@
 
 - (void)startNewScan;
 - (void)stopScanning;
+- (void)selectPluginWithTitle:(NSString *)pluginTitle;
 - (void)captureSettingsController:(UIViewController *)controller viewModel:(id)viewModel;
 - (BOOL)exportReportFromController:(UIViewController *)controller error:(NSError **)error;
 
