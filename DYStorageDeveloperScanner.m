@@ -2,6 +2,7 @@
 
 #import <UIKit/UIKit.h>
 #import <mach-o/dyld.h>
+#import <math.h>
 
 static NSString *DYScannerString(id object, NSString *key) {
     if (!object || key.length == 0) return nil;
@@ -58,6 +59,41 @@ static NSArray<UIWindow *> *DYScannerWindows(void) {
     return windows;
 }
 
+static BOOL DYScannerShouldIgnoreWindow(UIWindow *window) {
+    if (!window || window.hidden || window.alpha < 0.01) return YES;
+    NSString *windowClass = NSStringFromClass(window.class) ?: @"";
+    return [windowClass containsString:@"Keyboard"] ||
+           [windowClass containsString:@"TextEffects"] ||
+           [windowClass containsString:@"StatusBar"];
+}
+
+/// Only the frontmost application window should contribute visible text for a
+/// scan tick. Floating plug-in panels commonly live in a high-level custom
+/// UIWindow while DYStorage remains visible underneath; scanning every window
+/// would incorrectly assign those background labels to the selected plug-in.
+static NSArray<UIWindow *> *DYScannerFrontmostWindows(NSArray<UIWindow *> *windows) {
+    NSMutableArray<UIWindow *> *eligible = [NSMutableArray array];
+    CGFloat highestLevel = -CGFLOAT_MAX;
+    for (UIWindow *window in windows) {
+        if (DYScannerShouldIgnoreWindow(window)) continue;
+        [eligible addObject:window];
+        highestLevel = MAX(highestLevel, window.windowLevel);
+    }
+    if (eligible.count == 0) return @[];
+
+    NSMutableArray<UIWindow *> *frontmost = [NSMutableArray array];
+    for (UIWindow *window in eligible) {
+        if (fabs(window.windowLevel - highestLevel) < 0.5) [frontmost addObject:window];
+    }
+
+    NSIndexSet *keyIndexes = [frontmost indexesOfObjectsPassingTest:^BOOL(UIWindow *window,
+                                                                          __unused NSUInteger index,
+                                                                          __unused BOOL *stop) {
+        return window.isKeyWindow;
+    }];
+    return keyIndexes.count ? [frontmost objectsAtIndexes:keyIndexes] : frontmost;
+}
+
 static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     UIViewController *controller = window.rootViewController;
     BOOL advanced = YES;
@@ -102,6 +138,9 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
                        controller:(UIViewController *)controller
                             plugin:(NSString *)plugin
                               path:(NSArray<NSString *> *)path
+                       windowClass:(NSString *)windowClass
+                        windowLevel:(CGFloat)windowLevel
+                       isKeyWindow:(BOOL)isKeyWindow
                              depth:(NSInteger)depth;
 - (void)startScanTimer;
 @end
@@ -183,16 +222,16 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
 - (void)captureVisibleInterface {
     if (!self.isScanning) return;
     NSArray<UIWindow *> *windows = DYScannerWindows();
+    NSArray<UIWindow *> *frontmostWindows = DYScannerFrontmostWindows(windows);
     @synchronized (self) {
         self.scanTickCount += 1;
     }
 
+    // Keep diagnostics for every application window, even though only the
+    // frontmost window is allowed to contribute searchable text.
     for (UIWindow *window in windows) {
-        if (!window || window.hidden || window.alpha < 0.01) continue;
+        if (DYScannerShouldIgnoreWindow(window)) continue;
         NSString *windowClass = NSStringFromClass(window.class) ?: @"";
-        if ([windowClass containsString:@"Keyboard"] || [windowClass containsString:@"TextEffects"] ||
-            [windowClass containsString:@"StatusBar"]) continue;
-
         UIViewController *controller = DYScannerTopControllerForWindow(window);
         NSString *controllerClass = NSStringFromClass(controller.class) ?: @"";
         NSString *pageTitle = DYScannerControllerTitle(controller) ?: @"";
@@ -206,6 +245,13 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
                 @"pageTitle": pageTitle
             };
         }
+    }
+
+    for (UIWindow *window in frontmostWindows) {
+        NSString *windowClass = NSStringFromClass(window.class) ?: @"";
+        UIViewController *controller = DYScannerTopControllerForWindow(window);
+        NSString *controllerClass = NSStringFromClass(controller.class) ?: @"";
+        NSString *pageTitle = DYScannerControllerTitle(controller) ?: @"";
 
         if ([controller isKindOfClass:[UIAlertController class]] ||
             [controller isKindOfClass:[UIActivityViewController class]]) continue;
@@ -242,6 +288,9 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
                              controller:controller
                                   plugin:pluginTitle
                                     path:pagePath
+                             windowClass:windowClass
+                              windowLevel:window.windowLevel
+                             isKeyWindow:window.isKeyWindow
                                    depth:18];
     }
 }
@@ -250,6 +299,9 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
                        controller:(UIViewController *)controller
                             plugin:(NSString *)plugin
                               path:(NSArray<NSString *> *)path
+                       windowClass:(NSString *)windowClass
+                        windowLevel:(CGFloat)windowLevel
+                       isKeyWindow:(BOOL)isKeyWindow
                              depth:(NSInteger)depth {
     if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return;
     if (![view isKindOfClass:[UIWindow class]] && view.window == nil) return;
@@ -278,9 +330,12 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
         ![text isEqualToString:@"DYStorage"] && ![text isEqualToString:@"插件收纳"]) {
         NSString *pathKey = [path componentsJoinedByString:@"/"];
         NSString *viewClass = NSStringFromClass(view.class) ?: @"";
-        NSString *recordKey = [NSString stringWithFormat:@"%@|%@|%@|%@", plugin, pathKey, viewClass, text];
+        NSString *recordKey = [NSString stringWithFormat:@"%@|%@|%@|%@|%@", plugin, windowClass, pathKey, viewClass, text];
         NSDictionary *record = @{
             @"plugin": plugin,
+            @"windowClass": windowClass ?: @"",
+            @"windowLevel": @(windowLevel),
+            @"isKeyWindow": @(isKeyWindow),
             @"controllerClass": NSStringFromClass(controller.class) ?: @"",
             @"pagePath": path,
             @"pageTitle": DYScannerControllerTitle(controller) ?: @"",
@@ -294,7 +349,14 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     }
 
     for (UIView *subview in view.subviews) {
-        [self captureVisibleTextsInView:subview controller:controller plugin:plugin path:path depth:depth - 1];
+        [self captureVisibleTextsInView:subview
+                             controller:controller
+                                  plugin:plugin
+                                    path:path
+                             windowClass:windowClass
+                              windowLevel:windowLevel
+                             isKeyWindow:isKeyWindow
+                                   depth:depth - 1];
     }
 }
 
@@ -446,7 +508,8 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
 
     NSISO8601DateFormatter *formatter = [[NSISO8601DateFormatter alloc] init];
     return @{
-        @"schemaVersion": @1,
+        @"schemaVersion": @2,
+        @"visibleTextCaptureMode": @"frontmost-window",
         @"generatedAt": [formatter stringFromDate:[NSDate date]],
         @"startedAt": startedAt ? [formatter stringFromDate:startedAt] : @"",
         @"systemVersion": UIDevice.currentDevice.systemVersion ?: @"",
