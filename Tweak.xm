@@ -987,9 +987,24 @@ static NSArray<NSString *> *DYStorageFloatingRouteCandidatesForFeature(NSString 
         return candidates;
     }
     if ([plugin isEqualToString:@"抖音图层"]) {
-        // AwemeX keeps the actual options behind a custom table row while the
-        // overlay remains attached to Douyin's settings window.
-        return @[ @"点击此栏打开配置", @"点此栏打开配置", @"图层配置" ];
+        // AwemeX's floating root contains four custom category rows. Prefer the
+        // category implied by the scanned title, then keep the others as
+        // fallbacks for renamed/regrouped options in later plug-in releases.
+        NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+        NSString *title = DYStorageNormalizedFeatureText(featureTitle);
+        if ([title containsString:@"透明度"]) {
+            [candidates addObject:@"透明度"];
+        } else if ([title hasPrefix:@"移除"]) {
+            [candidates addObject:@"移除项"];
+        } else if ([title hasPrefix:@"隐藏"]) {
+            [candidates addObject:@"隐藏项"];
+        } else {
+            [candidates addObject:@"增强项"];
+        }
+        for (NSString *fallback in @[ @"增强项", @"透明度", @"移除项", @"隐藏项" ]) {
+            if (![candidates containsObject:fallback]) [candidates addObject:fallback];
+        }
+        return candidates;
     }
     return @[];
 }

@@ -1,6 +1,7 @@
 #import "DYStorageSearchCoordinator.h"
 
 #import <UIKit/UIKit.h>
+#import <math.h>
 
 static UITableView *DYStorageSearchFindTableView(UIView *view, NSInteger depth) {
     if (!view || depth < 0) return nil;
@@ -35,10 +36,13 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic) BOOL installedInsets;
 @property (nonatomic) NSUInteger pendingSearchGeneration;
 @property (nonatomic, weak) UINavigationController *navigationController;
-@property (nonatomic, strong) UIScreenEdgePanGestureRecognizer *searchBackGestureRecognizer;
+@property (nonatomic, strong) UIPanGestureRecognizer *searchBackGestureRecognizer;
 @property (nonatomic) BOOL previousInteractivePopGestureEnabled;
 @property (nonatomic) BOOL hasStoredInteractivePopGestureEnabled;
 @property (nonatomic) BOOL handlingSearchBackGesture;
+@property (nonatomic) BOOL pageVisible;
+@property (nonatomic, copy) NSArray<UIGestureRecognizer *> *suppressedNavigationGestures;
+@property (nonatomic, copy) NSArray<NSNumber *> *suppressedNavigationGestureStates;
 - (BOOL)installSearchHeader;
 - (NSString *)trimmedQuery;
 - (BOOL)isSearchInteractionActive;
@@ -48,7 +52,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (void)updateNavigationGestureState;
 - (void)restoreNavigationGestureState;
 - (BOOL)handleBackNavigationRequest;
-- (void)handleSearchBackGesture:(UIScreenEdgePanGestureRecognizer *)gestureRecognizer;
+- (void)handleSearchBackGesture:(UIPanGestureRecognizer *)gestureRecognizer;
 - (void)searchTextDidChange:(UITextField *)textField;
 @end
 
@@ -140,8 +144,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (BOOL)isTopController {
-    UINavigationController *navigationController = self.controller.navigationController;
-    return navigationController && navigationController.topViewController == self.controller;
+    return self.pageVisible && self.controller.viewIfLoaded.window != nil;
 }
 
 - (void)installNavigationInterceptors {
@@ -151,18 +154,24 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     UINavigationController *navigationController = controller.navigationController;
     if (self.navigationController != navigationController) {
         [self restoreNavigationGestureState];
+        [self.searchBackGestureRecognizer.view removeGestureRecognizer:self.searchBackGestureRecognizer];
         self.navigationController = navigationController;
     }
 
     if (!self.searchBackGestureRecognizer) {
-        UIScreenEdgePanGestureRecognizer *gestureRecognizer =
-            [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self
-                                                               action:@selector(handleSearchBackGesture:)];
-        gestureRecognizer.edges = UIRectEdgeLeft;
+        UIPanGestureRecognizer *gestureRecognizer =
+            [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                    action:@selector(handleSearchBackGesture:)];
+        gestureRecognizer.maximumNumberOfTouches = 1;
+        gestureRecognizer.cancelsTouchesInView = YES;
         gestureRecognizer.delegate = self;
         gestureRecognizer.enabled = NO;
-        [controller.view addGestureRecognizer:gestureRecognizer];
         self.searchBackGestureRecognizer = gestureRecognizer;
+    }
+    UIView *gestureHost = navigationController.view ?: controller.view;
+    if (gestureHost && self.searchBackGestureRecognizer.view != gestureHost) {
+        [self.searchBackGestureRecognizer.view removeGestureRecognizer:self.searchBackGestureRecognizer];
+        [gestureHost addGestureRecognizer:self.searchBackGestureRecognizer];
     }
     [self updateNavigationGestureState];
 }
@@ -179,6 +188,19 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
             self.previousInteractivePopGestureEnabled = interactivePopGesture.enabled;
             self.hasStoredInteractivePopGestureEnabled = YES;
         }
+        if (!self.suppressedNavigationGestures.count) {
+            NSMutableArray<UIGestureRecognizer *> *gestures = [NSMutableArray array];
+            NSMutableArray<NSNumber *> *states = [NSMutableArray array];
+            for (UIGestureRecognizer *gesture in navigationController.view.gestureRecognizers) {
+                if (gesture == self.searchBackGestureRecognizer ||
+                    ![gesture isKindOfClass:[UIPanGestureRecognizer class]]) continue;
+                [gestures addObject:gesture];
+                [states addObject:@(gesture.enabled)];
+                gesture.enabled = NO;
+            }
+            self.suppressedNavigationGestures = gestures;
+            self.suppressedNavigationGestureStates = states;
+        }
         interactivePopGesture.enabled = NO;
     } else {
         [self restoreNavigationGestureState];
@@ -186,6 +208,14 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)restoreNavigationGestureState {
+    NSUInteger stateCount = self.suppressedNavigationGestureStates.count;
+    [self.suppressedNavigationGestures enumerateObjectsUsingBlock:^(UIGestureRecognizer *gesture,
+                                                                    NSUInteger index,
+                                                                    __unused BOOL *stop) {
+        if (index < stateCount) gesture.enabled = self.suppressedNavigationGestureStates[index].boolValue;
+    }];
+    self.suppressedNavigationGestures = nil;
+    self.suppressedNavigationGestureStates = nil;
     if (self.hasStoredInteractivePopGestureEnabled) {
         self.navigationController.interactivePopGestureRecognizer.enabled =
             self.previousInteractivePopGestureEnabled;
@@ -197,7 +227,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (BOOL)handleBackNavigationRequest {
     if (![self isTopController] || ![self isSearchInteractionActive]) return NO;
 
-    // The first left-edge swipe exits search and restores the complete hub.
+    // The first horizontal back swipe exits search and restores the complete hub.
     // A following swipe is handled by UINavigationController and returns to
     // Douyin settings, matching the two visible page levels.
     ++self.pendingSearchGeneration;
@@ -208,7 +238,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     return YES;
 }
 
-- (void)handleSearchBackGesture:(UIScreenEdgePanGestureRecognizer *)gestureRecognizer {
+- (void)handleSearchBackGesture:(UIPanGestureRecognizer *)gestureRecognizer {
     switch (gestureRecognizer.state) {
         case UIGestureRecognizerStateBegan:
             // Keep the system pop gesture disabled until this complete touch
@@ -320,17 +350,21 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer {
     if (gestureRecognizer == self.searchBackGestureRecognizer) {
-        return [self isTopController] && [self isSearchInteractionActive];
+        if (![self isTopController] || ![self isSearchInteractionActive]) return NO;
+        CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:gestureRecognizer.view];
+        return fabs(velocity.x) > fabs(velocity.y) * 1.15;
     }
     return YES;
 }
 
 - (void)pageDidAppear {
+    self.pageVisible = YES;
     [self installNavigationInterceptors];
     [self updateNavigationGestureState];
 }
 
 - (void)pageDidDisappear {
+    self.pageVisible = NO;
     self.handlingSearchBackGesture = NO;
     [self restoreNavigationGestureState];
 }
@@ -338,7 +372,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (void)dealloc {
     ++_pendingSearchGeneration;
     [self restoreNavigationGestureState];
-    [_controller.viewIfLoaded removeGestureRecognizer:_searchBackGestureRecognizer];
+    [_searchBackGestureRecognizer.view removeGestureRecognizer:_searchBackGestureRecognizer];
     [_searchTextField removeTarget:self action:@selector(searchTextDidChange:) forControlEvents:UIControlEventEditingChanged];
     UITableView *tableView = self.tableView;
     if (tableView && self.installedInsets) {
