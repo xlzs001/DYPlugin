@@ -3,6 +3,9 @@
 @implementation DYStorageRegistration
 @end
 
+static const NSUInteger kDYStorageMaximumCapturedItems = 128;
+static const NSUInteger kDYStorageMaximumRegisteredPlugins = 128;
+
 static NSString *DYStorageStringValue(id object, NSString *key) {
     if (!object || key.length == 0) return nil;
     @try {
@@ -75,7 +78,9 @@ static NSString *DYStorageKeyForSettingItem(id item) {
             }
 
             if (existingIndex == NSNotFound) {
-                [_capturedSettingsItems addObject:item];
+                if (_capturedSettingsItems.count < kDYStorageMaximumCapturedItems) {
+                    [_capturedSettingsItems addObject:item];
+                }
             } else {
                 // Settings view models are recreated during refreshes. Keep the
                 // latest item so its click block never points at a stale model.
@@ -95,6 +100,7 @@ static NSString *DYStorageKeyForSettingItem(id item) {
         if (!key.length || [keys containsObject:key]) continue;
         [keys addObject:key];
         [deduplicated addObject:item];
+        if (deduplicated.count >= kDYStorageMaximumCapturedItems) break;
     }
 
     @synchronized (self) {
@@ -182,6 +188,7 @@ static NSString *DYStorageKeyForSettingItem(id item) {
             }
         }
         if (existingIndex == NSNotFound) {
+            if (_registeredPlugins.count >= kDYStorageMaximumRegisteredPlugins) return NO;
             [_registeredPlugins addObject:registration];
         } else {
             _registeredPlugins[existingIndex] = registration;

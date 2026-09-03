@@ -4,6 +4,11 @@
 #import <mach-o/dyld.h>
 #import <math.h>
 
+static const NSTimeInterval kDYScannerMaximumDuration = 30.0 * 60.0;
+static const NSUInteger kDYScannerMaximumSettingsRecords = 8000;
+static const NSUInteger kDYScannerMaximumVisibleTextRecords = 12000;
+static const NSUInteger kDYScannerMaximumControllerSamples = 512;
+
 static NSString *DYScannerString(id object, NSString *key) {
     if (!object || key.length == 0) return nil;
     @try {
@@ -96,29 +101,21 @@ static NSArray<UIWindow *> *DYScannerFrontmostWindows(NSArray<UIWindow *> *windo
 
 static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     UIViewController *controller = window.rootViewController;
-    BOOL advanced = YES;
-    while (controller && advanced) {
-        advanced = NO;
+    for (NSUInteger depth = 0; controller && depth < 32; depth++) {
+        UIViewController *nextController = nil;
         if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
-            controller = controller.presentedViewController;
-            advanced = YES;
-            continue;
+            nextController = controller.presentedViewController;
         }
         if ([controller isKindOfClass:[UINavigationController class]]) {
             UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
-            if (visible && visible != controller) {
-                controller = visible;
-                advanced = YES;
-                continue;
-            }
+            if (!nextController && visible) nextController = visible;
         }
         if ([controller isKindOfClass:[UITabBarController class]]) {
             UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
-            if (selected && selected != controller) {
-                controller = selected;
-                advanced = YES;
-            }
+            if (!nextController && selected) nextController = selected;
         }
+        if (!nextController || nextController == controller) break;
+        controller = nextController;
     }
     return controller;
 }
@@ -213,7 +210,20 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     [self.scanTimer invalidate];
     __weak DYStorageDeveloperScanner *weakSelf = self;
     self.scanTimer = [NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(__unused NSTimer *timer) {
-        [weakSelf captureVisibleInterface];
+        DYStorageDeveloperScanner *strongSelf = weakSelf;
+        if (!strongSelf) return;
+        if (strongSelf.startedAt &&
+            [[NSDate date] timeIntervalSinceDate:strongSelf.startedAt] >= kDYScannerMaximumDuration) {
+            // Developer mode is normally hidden. If it is enabled manually and
+            // forgotten, stop the recursive timer but preserve `scanning` and
+            // all records so the next scanner tap can still export the report.
+            [strongSelf.scanTimer invalidate];
+            strongSelf.scanTimer = nil;
+            return;
+        }
+        @autoreleasepool {
+            [strongSelf captureVisibleInterface];
+        }
     }];
     [[NSRunLoop mainRunLoop] addTimer:self.scanTimer forMode:NSRunLoopCommonModes];
     [self captureVisibleInterface];
@@ -237,13 +247,16 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
         NSString *pageTitle = DYScannerControllerTitle(controller) ?: @"";
         NSString *sampleKey = [NSString stringWithFormat:@"%@|%@|%@", windowClass, controllerClass, pageTitle];
         @synchronized (self) {
-            self.controllerSamplesByKey[sampleKey] = @{
-                @"windowClass": windowClass,
-                @"windowLevel": @(window.windowLevel),
-                @"isKeyWindow": @(window.isKeyWindow),
-                @"controllerClass": controllerClass,
-                @"pageTitle": pageTitle
-            };
+            if (self.controllerSamplesByKey[sampleKey] ||
+                self.controllerSamplesByKey.count < kDYScannerMaximumControllerSamples) {
+                self.controllerSamplesByKey[sampleKey] = @{
+                    @"windowClass": windowClass,
+                    @"windowLevel": @(window.windowLevel),
+                    @"isKeyWindow": @(window.isKeyWindow),
+                    @"controllerClass": controllerClass,
+                    @"pageTitle": pageTitle
+                };
+            }
         }
     }
 
@@ -344,7 +357,10 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
             @"accessibilityIdentifier": view.accessibilityIdentifier ?: @""
         };
         @synchronized (self) {
-            self.visibleTextsByKey[recordKey] = record;
+            if (self.visibleTextsByKey[recordKey] ||
+                self.visibleTextsByKey.count < kDYScannerMaximumVisibleTextRecords) {
+                self.visibleTextsByKey[recordKey] = record;
+            }
         }
     }
 
@@ -387,13 +403,15 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     }
 
     UIViewController *presenting = controller.navigationController.presentingViewController ?: controller.presentingViewController;
-    while (presenting && !anchoredToSettings) {
+    for (NSUInteger depth = 0; presenting && !anchoredToSettings && depth < 32; depth++) {
         NSString *title = DYScannerControllerTitle(presenting);
         if ([title isEqualToString:@"DYStorage"] || [title isEqualToString:@"设置"] || [title isEqualToString:@"插件收纳"]) {
             anchoredToSettings = YES;
             break;
         }
-        presenting = presenting.presentingViewController;
+        UIViewController *nextPresenting = presenting.presentingViewController;
+        if (!nextPresenting || nextPresenting == presenting) break;
+        presenting = nextPresenting;
     }
 
     NSString *rootTitle = path.firstObject;
@@ -449,7 +467,10 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
             NSString *itemKey = identifier.length ? identifier : title;
             NSString *recordKey = [NSString stringWithFormat:@"%@|%@|%@|%@", pluginTitle, pathKey, sectionTitle, itemKey];
             @synchronized (self) {
-                self.recordsByKey[recordKey] = record;
+                if (self.recordsByKey[recordKey] ||
+                    self.recordsByKey.count < kDYScannerMaximumSettingsRecords) {
+                    self.recordsByKey[recordKey] = record;
+                }
             }
         }
     }
@@ -535,9 +556,12 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     if (![data writeToURL:fileURL options:NSDataWritingAtomic error:error]) return NO;
 
     UIViewController *presenter = controller;
-    while (presenter.presentedViewController && !presenter.presentedViewController.isBeingDismissed) {
-        presenter = presenter.presentedViewController;
+    for (NSUInteger depth = 0; presenter && depth < 32; depth++) {
+        UIViewController *nextPresenter = presenter.presentedViewController;
+        if (!nextPresenter || nextPresenter == presenter || nextPresenter.isBeingDismissed) break;
+        presenter = nextPresenter;
     }
+    if (!presenter) return NO;
     UIActivityViewController *activity = [[UIActivityViewController alloc] initWithActivityItems:@[ fileURL ] applicationActivities:nil];
     activity.popoverPresentationController.sourceView = presenter.view;
     activity.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(presenter.view.bounds), CGRectGetMaxY(presenter.view.bounds), 1, 1);

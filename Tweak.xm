@@ -11,6 +11,8 @@
 
 #import "DYStorageManager.h"
 #import "DYStorageDeveloperScanner.h"
+#import "DYStorageSearchCatalog.h"
+#import "DYStorageSearchCoordinator.h"
 
 #ifndef DY_STORAGE_DEBUG
 #define DY_STORAGE_DEBUG 0
@@ -31,6 +33,8 @@ static NSString *const kDYStorageRepositoryURL = @"https://github.com/xlzs001/DY
 
 static void *kDYStorageViewModelAssociationKey = &kDYStorageViewModelAssociationKey;
 static void *kDYStorageFallbackHiddenSectionKey = &kDYStorageFallbackHiddenSectionKey;
+static void *kDYStorageSearchCoordinatorAssociationKey = &kDYStorageSearchCoordinatorAssociationKey;
+static void *kDYStorageFeatureTableScanStateKey = &kDYStorageFeatureTableScanStateKey;
 
 static BOOL gDYStorageSettingsHookInstalled = NO;
 static BOOL gDYStorageHubHookInstalled = NO;
@@ -42,6 +46,7 @@ static BOOL gDYStorageOrganizingMainSections = NO;
 static BOOL gDYStorageCheckingFallbackHeader = NO;
 
 static void DYStorageRefreshHubController(UIViewController *controller);
+static NSArray *DYStorageHubSections(void);
 
 #pragma mark - Runtime-safe model access
 
@@ -118,25 +123,25 @@ static UIViewController *DYStorageTopViewController(UIViewController *rootContro
     UIViewController *controller = rootController ?: DYStorageKeyWindow().rootViewController;
     if (!controller) return nil;
 
-    while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
-        controller = controller.presentedViewController;
-    }
-    while (YES) {
+    // Resolve one level at a time so a child of a navigation/tab controller
+    // can still have its own presented controller. The hard limit and identity
+    // checks prevent malformed private containers from producing an infinite
+    // loop on the main thread.
+    for (NSUInteger depth = 0; depth < 32; depth++) {
+        UIViewController *nextController = nil;
+        if (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+            nextController = controller.presentedViewController;
+        }
         if ([controller isKindOfClass:[UINavigationController class]]) {
             UIViewController *visible = ((UINavigationController *)controller).visibleViewController;
-            if (visible) {
-                controller = visible;
-                continue;
-            }
+            if (!nextController && visible) nextController = visible;
         }
         if ([controller isKindOfClass:[UITabBarController class]]) {
             UIViewController *selected = ((UITabBarController *)controller).selectedViewController;
-            if (selected) {
-                controller = selected;
-                continue;
-            }
+            if (!nextController && selected) nextController = selected;
         }
-        break;
+        if (!nextController || nextController == controller) break;
+        controller = nextController;
     }
     return controller;
 }
@@ -262,12 +267,19 @@ static BOOL DYStorageIsXUUAssistantSectionWithItems(id section, NSArray *items) 
 
 static NSArray *DYStorageRemoveXUUFromHubSections(NSArray *sections) {
     if (![sections isKindOfClass:[NSArray class]]) return sections;
-    NSMutableArray *cleaned = [NSMutableArray arrayWithCapacity:sections.count];
-    for (id section in sections) {
-        if (DYStorageIsXUUAssistantSectionWithItems(section, DYStorageArrayValue(section, @"itemArray"))) continue;
-        [cleaned addObject:section];
+    NSMutableArray *cleaned = nil;
+    for (NSUInteger index = 0; index < sections.count; index++) {
+        id section = sections[index];
+        if (DYStorageIsXUUAssistantSectionWithItems(section, DYStorageArrayValue(section, @"itemArray"))) {
+            if (!cleaned) {
+                cleaned = [NSMutableArray arrayWithCapacity:sections.count - 1];
+                if (index > 0) [cleaned addObjectsFromArray:[sections subarrayWithRange:NSMakeRange(0, index)]];
+            }
+            continue;
+        }
+        if (cleaned) [cleaned addObject:section];
     }
-    return cleaned;
+    return cleaned ?: sections;
 }
 
 static BOOL DYStorageLooksLikeMainSettingsPage(NSArray *sections) {
@@ -397,9 +409,874 @@ static void DYStorageOpenRegistration(DYStorageRegistration *registration) {
     else dispatch_async(dispatch_get_main_queue(), open);
 }
 
+#pragma mark - Aggregate search
+
+static BOOL DYStorageDeveloperUIEnabled(void) {
+    // Kept off for normal users. Developers can enable the scanner without a
+    // rebuild by setting DYStorageDeveloperMode=YES in Aweme's preferences.
+    return [[NSUserDefaults standardUserDefaults] boolForKey:@"DYStorageDeveloperMode"];
+}
+
+static BOOL DYStorageTitleMatchesCatalogAlias(NSString *title, NSString *alias) {
+    NSString *normalizedTitle = DYStorageNormalizedString(title);
+    NSString *normalizedAlias = DYStorageNormalizedString(alias);
+    if (!normalizedTitle.length || !normalizedAlias.length) return NO;
+    if ([normalizedTitle isEqualToString:normalizedAlias]) return YES;
+    if (![normalizedTitle hasPrefix:normalizedAlias]) return NO;
+    NSString *suffix = [[normalizedTitle substringFromIndex:normalizedAlias.length]
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return [suffix isEqualToString:@"设置"] ||
+           [suffix isEqualToString:@"setting"] ||
+           [suffix isEqualToString:@"settings"];
+}
+
+static BOOL DYStorageTitleMatchesCatalogEntry(NSString *title, NSDictionary *catalogEntry) {
+    if (DYStorageTitleMatchesCatalogAlias(title, catalogEntry[@"plugin"])) return YES;
+    for (NSString *alias in catalogEntry[@"aliases"]) {
+        if (DYStorageTitleMatchesCatalogAlias(title, alias)) return YES;
+    }
+    return NO;
+}
+
+/// Maps canonical catalog names to the currently installed root entry. The
+/// stored action is always the original plug-in callback, so a search result
+/// opens the same UI as tapping that plug-in in DYStorage.
+static NSDictionary<NSString *, NSDictionary *> *DYStorageInstalledSearchTargets(void) {
+    DYStorageManager *manager = [DYStorageManager sharedManager];
+    NSArray<NSDictionary *> *catalog = DYStorageSearchCatalog();
+    NSMutableDictionary<NSString *, NSDictionary *> *targets = [NSMutableDictionary dictionary];
+
+    for (id item in [manager capturedSettingsItems]) {
+        NSString *title = DYStorageStringValue(item, @"title");
+        id actionObject = DYStorageValue(item, @"cellTappedBlock");
+        if (![NSStringFromClass([actionObject class]) containsString:@"Block"]) continue;
+
+        for (NSDictionary *catalogEntry in catalog) {
+            NSString *plugin = catalogEntry[@"plugin"];
+            if (plugin.length == 0 || targets[plugin] || !DYStorageTitleMatchesCatalogEntry(title, catalogEntry)) continue;
+            DYStorageAction action = [(DYStorageAction)actionObject copy];
+            NSString *iconName = DYStorageStringValue(item, @"svgIconImageName") ?:
+                                 DYStorageStringValue(item, @"iconImageName") ?: @"ic_search_outlined_20";
+            targets[plugin] = @{
+                @"action": action,
+                @"icon": iconName,
+                @"installedTitle": title ?: plugin
+            };
+            break;
+        }
+    }
+
+    for (DYStorageRegistration *registration in [manager registeredPlugins]) {
+        for (NSDictionary *catalogEntry in catalog) {
+            NSString *plugin = catalogEntry[@"plugin"];
+            if (plugin.length == 0 || targets[plugin] ||
+                !DYStorageTitleMatchesCatalogEntry(registration.title, catalogEntry)) continue;
+            DYStorageAction action = ^{
+                DYStorageOpenRegistration(registration);
+            };
+            targets[plugin] = @{
+                @"action": [action copy],
+                @"icon": @"ic_search_outlined_20",
+                @"installedTitle": registration.title ?: plugin
+            };
+            break;
+        }
+    }
+    return targets;
+}
+
+static BOOL DYStorageSearchTextMatches(NSString *query, NSArray<NSString *> *components) {
+    for (NSString *component in components) {
+        if (![component isKindOfClass:[NSString class]] || component.length == 0) continue;
+        if ([component rangeOfString:query
+                            options:NSCaseInsensitiveSearch | NSDiacriticInsensitiveSearch].location != NSNotFound) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static NSUInteger gDYStorageFeatureNavigationGeneration = 0;
+static __weak UIViewController *gDYStoragePendingSourceController = nil;
+static NSString *gDYStoragePendingFeatureSection = nil;
+static NSString *gDYStoragePendingFeatureTitle = nil;
+static NSArray<NSString *> *gDYStoragePendingFeatureRoute = nil;
+static NSUInteger gDYStoragePendingFeatureRouteIndex = 0;
+static __weak UIViewController *gDYStorageLastRouteController = nil;
+static NSArray<NSString *> *gDYStoragePendingFloatingRouteCandidates = nil;
+static NSUInteger gDYStoragePendingFloatingRouteIndex = 0;
+
+static void DYStoragePulseHighlightView(UIView *view) {
+    if (!view) return;
+    UIView *overlay = [[UIView alloc] initWithFrame:view.bounds];
+    overlay.userInteractionEnabled = NO;
+    overlay.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    overlay.backgroundColor = [UIColor.systemYellowColor colorWithAlphaComponent:0.28];
+    overlay.layer.cornerRadius = MIN(10.0, view.layer.cornerRadius);
+    overlay.alpha = 0;
+    [view addSubview:overlay];
+    [UIView animateWithDuration:0.18 animations:^{
+        overlay.alpha = 1;
+    } completion:^(__unused BOOL finished) {
+        [UIView animateWithDuration:0.65
+                              delay:0.15
+                            options:UIViewAnimationOptionCurveEaseOut
+                         animations:^{ overlay.alpha = 0; }
+                         completion:^(__unused BOOL completed) { [overlay removeFromSuperview]; }];
+    }];
+}
+
+static void DYStorageScrollToFeatureView(UIView *view) {
+    if (!view) return;
+    UIScrollView *scrollView = nil;
+    for (UIView *ancestor = view.superview; ancestor; ancestor = ancestor.superview) {
+        if ([ancestor isKindOfClass:[UIScrollView class]]) {
+            scrollView = (UIScrollView *)ancestor;
+            break;
+        }
+    }
+    if (scrollView) {
+        CGRect rect = [view convertRect:view.bounds toView:scrollView];
+        [scrollView scrollRectToVisible:CGRectInset(rect, -12, -18) animated:YES];
+    }
+    __weak UIView *weakView = view;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        DYStoragePulseHighlightView(weakView);
+    });
+}
+
+static NSString *DYStorageNormalizedFeatureText(NSString *text) {
+    NSString *normalized = DYStorageNormalizedString(text);
+    if (!normalized.length) return nil;
+    NSCharacterSet *prefixes = [NSCharacterSet characterSetWithCharactersInString:@"•·●◦▪▫・- "];
+    return [normalized stringByTrimmingCharactersInSet:prefixes];
+}
+
+static NSString *DYStorageVisibleTextForView(UIView *view) {
+    if ([view isKindOfClass:[UILabel class]]) return ((UILabel *)view).text;
+    if ([view isKindOfClass:[UIButton class]]) {
+        return [(UIButton *)view titleForState:UIControlStateNormal] ?: view.accessibilityLabel;
+    }
+    if ([view isKindOfClass:[UITextField class]]) return ((UITextField *)view).text;
+    return view.accessibilityLabel;
+}
+
+static UIView *DYStorageFindFeatureTextView(UIView *view,
+                                            UIView *ignoredRoot,
+                                            NSString *normalizedTitle,
+                                            NSInteger depth) {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return nil;
+    if (ignoredRoot && (view == ignoredRoot || [view isDescendantOfView:ignoredRoot])) return nil;
+    NSString *text = DYStorageNormalizedFeatureText(DYStorageVisibleTextForView(view));
+    if (text.length && [text isEqualToString:normalizedTitle]) return view;
+    for (UIView *subview in [view.subviews reverseObjectEnumerator]) {
+        UIView *match = DYStorageFindFeatureTextView(subview, ignoredRoot, normalizedTitle, depth - 1);
+        if (match) return match;
+    }
+    return nil;
+}
+
+static void DYStorageActivateOrHighlightTableRow(UITableView *tableView, NSIndexPath *indexPath) {
+    if (!tableView || !indexPath) return;
+    @try {
+        [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+    } @catch (__unused NSException *exception) {
+        return;
+    }
+
+    __weak UITableView *weakTableView = tableView;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.32 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UITableView *strongTableView = weakTableView;
+        UITableViewCell *cell = [strongTableView cellForRowAtIndexPath:indexPath];
+        if (!cell) return;
+        id<UITableViewDelegate> delegate = strongTableView.delegate;
+        if (cell.accessoryType == UITableViewCellAccessoryDisclosureIndicator &&
+            [delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) {
+            [delegate tableView:strongTableView didSelectRowAtIndexPath:indexPath];
+            return;
+        }
+        DYStoragePulseHighlightView(cell.contentView ?: cell);
+    });
+}
+
+static BOOL DYStorageLocateFeatureInTableViews(UIView *view,
+                                               UIView *ignoredRoot,
+                                               NSString *normalizedTitle,
+                                               NSInteger depth) {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return NO;
+    if (ignoredRoot && (view == ignoredRoot || [view isDescendantOfView:ignoredRoot])) return NO;
+
+    if ([view isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)view;
+        id<UITableViewDataSource> dataSource = tableView.dataSource;
+        NSInteger sectionCount = 0;
+        @try {
+            sectionCount = [dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]
+                ? [dataSource numberOfSectionsInTableView:tableView]
+                : (dataSource ? 1 : 0);
+        } @catch (__unused NSException *exception) {
+            sectionCount = 0;
+        }
+        sectionCount = MAX(0, MIN(sectionCount, 80));
+        NSMutableArray<NSNumber *> *rowCounts = [NSMutableArray arrayWithCapacity:(NSUInteger)sectionCount];
+        NSInteger totalRows = 0;
+        for (NSInteger section = 0; section < sectionCount && totalRows < 600; section++) {
+            NSInteger rowCount = 0;
+            @try {
+                rowCount = [dataSource tableView:tableView numberOfRowsInSection:section];
+            } @catch (__unused NSException *exception) {
+                rowCount = 0;
+            }
+            rowCount = MAX(0, MIN(rowCount, 600 - totalRows));
+            [rowCounts addObject:@(rowCount)];
+            totalRows += rowCount;
+        }
+
+        // A missing feature used to rebuild as many as 600 off-screen cells on
+        // every scheduled retry. Cache one complete scan for each navigation
+        // generation/table shape so a failed lookup cannot freeze the main
+        // thread after several seconds on a large plug-in page.
+        NSDictionary *previousState = objc_getAssociatedObject(tableView, kDYStorageFeatureTableScanStateKey);
+        BOOL alreadyScanned = totalRows > 0 &&
+            [previousState[@"generation"] unsignedIntegerValue] == gDYStorageFeatureNavigationGeneration &&
+            [previousState[@"rowCounts"] isEqual:rowCounts] &&
+            [previousState[@"contentHeight"] doubleValue] == tableView.contentSize.height;
+        if (!alreadyScanned && totalRows > 0) {
+            objc_setAssociatedObject(tableView,
+                                     kDYStorageFeatureTableScanStateKey,
+                                     @{ @"generation": @(gDYStorageFeatureNavigationGeneration),
+                                        @"rowCounts": [rowCounts copy],
+                                        @"contentHeight": @(tableView.contentSize.height) },
+                                     OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            NSInteger inspectedRows = 0;
+            for (NSUInteger section = 0; section < rowCounts.count && inspectedRows < 600; section++) {
+                NSInteger rowCount = rowCounts[section].integerValue;
+                for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
+                    @autoreleasepool {
+                        NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:(NSInteger)section];
+                        UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                        if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
+                            @try {
+                                cell = [dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
+                            } @catch (__unused NSException *exception) {
+                                cell = nil;
+                            }
+                        }
+                        if (!cell || !DYStorageFindFeatureTextView(cell, nil, normalizedTitle, 10)) continue;
+                        DYStorageActivateOrHighlightTableRow(tableView, indexPath);
+                        return YES;
+                    }
+                }
+            }
+        }
+    }
+
+    for (UIView *subview in [view.subviews reverseObjectEnumerator]) {
+        if (DYStorageLocateFeatureInTableViews(subview, ignoredRoot, normalizedTitle, depth - 1)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageActivateFloatingRouteInTableViews(UIView *view,
+                                                        UIView *ignoredRoot,
+                                                        NSString *normalizedTitle,
+                                                        NSInteger depth) {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return NO;
+    if (ignoredRoot && (view == ignoredRoot || [view isDescendantOfView:ignoredRoot])) return NO;
+
+    if ([view isKindOfClass:[UITableView class]]) {
+        UITableView *tableView = (UITableView *)view;
+        id<UITableViewDataSource> dataSource = tableView.dataSource;
+        id<UITableViewDelegate> delegate = tableView.delegate;
+        NSInteger sectionCount = 0;
+        @try {
+            sectionCount = [dataSource respondsToSelector:@selector(numberOfSectionsInTableView:)]
+                ? [dataSource numberOfSectionsInTableView:tableView]
+                : (dataSource ? 1 : 0);
+        } @catch (__unused NSException *exception) {
+            sectionCount = 0;
+        }
+        sectionCount = MAX(0, MIN(sectionCount, 40));
+
+        NSInteger inspectedRows = 0;
+        for (NSInteger section = 0; section < sectionCount && inspectedRows < 300; section++) {
+            NSInteger rowCount = 0;
+            @try {
+                rowCount = [dataSource tableView:tableView numberOfRowsInSection:section];
+            } @catch (__unused NSException *exception) {
+                rowCount = 0;
+            }
+            rowCount = MAX(0, MIN(rowCount, 300 - inspectedRows));
+            for (NSInteger row = 0; row < rowCount; row++, inspectedRows++) {
+                @autoreleasepool {
+                    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:row inSection:section];
+                    UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
+                    if (!cell && [dataSource respondsToSelector:@selector(tableView:cellForRowAtIndexPath:)]) {
+                        @try {
+                            cell = [dataSource tableView:tableView cellForRowAtIndexPath:indexPath];
+                        } @catch (__unused NSException *exception) {
+                            cell = nil;
+                        }
+                    }
+                    if (!cell || !DYStorageFindFeatureTextView(cell, nil, normalizedTitle, 10)) continue;
+                    if (![delegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) return NO;
+
+                    __weak UITableView *weakTableView = tableView;
+                    __weak id<UITableViewDelegate> weakDelegate = delegate;
+                    NSIndexPath *targetIndexPath = [indexPath copy];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        UITableView *strongTableView = weakTableView;
+                        id<UITableViewDelegate> strongDelegate = weakDelegate;
+                        if (!strongTableView ||
+                            ![strongDelegate respondsToSelector:@selector(tableView:didSelectRowAtIndexPath:)]) return;
+                        @try {
+                            [strongTableView scrollToRowAtIndexPath:targetIndexPath
+                                                   atScrollPosition:UITableViewScrollPositionMiddle
+                                                           animated:NO];
+                            [strongDelegate tableView:strongTableView didSelectRowAtIndexPath:targetIndexPath];
+                        } @catch (__unused NSException *exception) {
+                        }
+                    });
+                    return YES;
+                }
+            }
+        }
+    }
+
+    for (UIView *subview in [view.subviews reverseObjectEnumerator]) {
+        if (DYStorageActivateFloatingRouteInTableViews(subview,
+                                                       ignoredRoot,
+                                                       normalizedTitle,
+                                                       depth - 1)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageActivateFloatingRouteInVisibleWindows(UIViewController *sourceController,
+                                                            NSString *routeTitle) {
+    NSString *normalizedTitle = DYStorageNormalizedFeatureText(routeTitle);
+    if (!normalizedTitle.length) return NO;
+    UIView *ignoredRoot = DYStorageFindTableView(sourceController.viewIfLoaded, 8) ?: sourceController.viewIfLoaded;
+    NSArray<UIWindow *> *windows = [DYStorageWindows() sortedArrayUsingComparator:^NSComparisonResult(UIWindow *left,
+                                                                                                       UIWindow *right) {
+        if (left.windowLevel > right.windowLevel) return NSOrderedAscending;
+        if (left.windowLevel < right.windowLevel) return NSOrderedDescending;
+        if (left.isKeyWindow != right.isKeyWindow) return left.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    for (UIWindow *window in windows) {
+        if (window.hidden || window.alpha < 0.01) continue;
+        if (DYStorageActivateFloatingRouteInTableViews(window,
+                                                       ignoredRoot,
+                                                       normalizedTitle,
+                                                       24)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageLocateFeatureInVisibleWindows(UIViewController *sourceController,
+                                                   NSString *title) {
+    NSString *normalizedTitle = DYStorageNormalizedFeatureText(title);
+    if (!normalizedTitle.length) return NO;
+    // Ignore the organizer's result table itself, but not the whole source
+    // controller: XUU/AwemeX may attach their floating panel directly above
+    // that same controller instead of presenting a new controller/window.
+    UIView *ignoredRoot = DYStorageFindTableView(sourceController.viewIfLoaded, 8) ?: sourceController.viewIfLoaded;
+    NSArray<UIWindow *> *windows = [DYStorageWindows() sortedArrayUsingComparator:^NSComparisonResult(UIWindow *left,
+                                                                                                       UIWindow *right) {
+        if (left.windowLevel > right.windowLevel) return NSOrderedAscending;
+        if (left.windowLevel < right.windowLevel) return NSOrderedDescending;
+        if (left.isKeyWindow != right.isKeyWindow) return left.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+    for (UIWindow *window in windows) {
+        if (window.hidden || window.alpha < 0.01) continue;
+        UIView *match = DYStorageFindFeatureTextView(window, ignoredRoot, normalizedTitle, 24);
+        if (match) {
+            UITableViewCell *cell = nil;
+            UITableView *tableView = nil;
+            for (UIView *ancestor = match; ancestor; ancestor = ancestor.superview) {
+                if (!cell && [ancestor isKindOfClass:[UITableViewCell class]]) cell = (UITableViewCell *)ancestor;
+                if ([ancestor isKindOfClass:[UITableView class]]) {
+                    tableView = (UITableView *)ancestor;
+                    break;
+                }
+            }
+            NSIndexPath *indexPath = cell && tableView ? [tableView indexPathForCell:cell] : nil;
+            if (indexPath) DYStorageActivateOrHighlightTableRow(tableView, indexPath);
+            else DYStorageScrollToFeatureView(match);
+            return YES;
+        }
+        // UITableView keeps only visible cells attached. Ask the plug-in's data
+        // source for lightweight cells so an off-screen XUU/AwemeX row can be
+        // found and scrolled into view without guessing its position.
+        if (DYStorageLocateFeatureInTableViews(window, ignoredRoot, normalizedTitle, 24)) return YES;
+    }
+    return NO;
+}
+
+static BOOL DYStorageLocateFeatureInSettingsController(UIViewController *controller,
+                                                        NSString *sectionTitle,
+                                                        NSString *featureTitle) {
+    if (!controller || objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey)) return NO;
+    id viewModel = DYStorageValue(controller, @"viewModel");
+    NSArray *sections = DYStorageArrayValue(viewModel, @"sectionDataArray");
+    if (sections.count == 0) return NO;
+
+    NSString *normalizedSection = DYStorageNormalizedString(sectionTitle);
+    NSString *normalizedFeature = DYStorageNormalizedString(featureTitle);
+    NSInteger matchedSection = NSNotFound;
+    NSInteger matchedRow = NSNotFound;
+    id matchedItem = nil;
+
+    // Prefer the scanned section path; fall back to an exact title match when
+    // a plug-in renamed or regrouped the setting in a later release.
+    for (NSInteger pass = 0; pass < 2 && !matchedItem; pass++) {
+        for (NSUInteger sectionIndex = 0; sectionIndex < sections.count && !matchedItem; sectionIndex++) {
+            id section = sections[sectionIndex];
+            NSString *candidateSection = DYStorageNormalizedString(DYStorageStringValue(section, @"sectionHeaderTitle"));
+            if (pass == 0 && normalizedSection.length && ![candidateSection isEqualToString:normalizedSection]) continue;
+            NSArray *items = DYStorageArrayValue(section, @"itemArray");
+            for (NSUInteger rowIndex = 0; rowIndex < items.count; rowIndex++) {
+                id item = items[rowIndex];
+                if (![DYStorageNormalizedString(DYStorageStringValue(item, @"title")) isEqualToString:normalizedFeature]) continue;
+                matchedSection = (NSInteger)sectionIndex;
+                matchedRow = (NSInteger)rowIndex;
+                matchedItem = item;
+                break;
+            }
+        }
+    }
+    if (!matchedItem) return NO;
+
+    NSNumber *cellType = DYStorageValue(matchedItem, @"cellType");
+    id actionObject = DYStorageValue(matchedItem, @"cellTappedBlock");
+    if ([cellType isKindOfClass:[NSNumber class]] && cellType.integerValue == 26 &&
+        [NSStringFromClass([actionObject class]) containsString:@"Block"]) {
+        // Cell type 26 is the settings framework's tappable navigation/action
+        // row. Invoke the original callback so dialogs and child pages open at
+        // the same destination as a direct tap in the plug-in.
+        DYStorageAction action = [(DYStorageAction)actionObject copy];
+        action();
+        return YES;
+    }
+
+    UITableView *tableView = DYStorageFindTableView(controller.viewIfLoaded, 8);
+    if (!tableView || matchedSection == NSNotFound || matchedRow == NSNotFound) return YES;
+    NSIndexPath *indexPath = [NSIndexPath indexPathForRow:matchedRow inSection:matchedSection];
+    @try {
+        [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionMiddle animated:YES];
+        __weak UITableView *weakTableView = tableView;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.30 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            UITableViewCell *cell = [weakTableView cellForRowAtIndexPath:indexPath];
+            DYStoragePulseHighlightView(cell.contentView ?: cell);
+        });
+    } @catch (__unused NSException *exception) {
+        // The private table model can differ between app versions. The feature
+        // was still resolved, so leave the user on the correct plug-in page.
+    }
+    return YES;
+}
+
+static UITextField *DYStorageFindSettingsSearchField(UIView *view, NSInteger depth) {
+    if (!view || depth < 0 || view.hidden || view.alpha < 0.01) return nil;
+    if ([view isKindOfClass:[UITextField class]]) {
+        UITextField *field = (UITextField *)view;
+        NSString *accessibility = DYStorageNormalizedString(field.accessibilityLabel);
+        NSString *placeholder = DYStorageNormalizedString(field.placeholder);
+        BOOL settingsSearch = [accessibility containsString:@"设置搜索"] ||
+                              [placeholder containsString:@"搜索设置"];
+        if (settingsSearch) return field;
+    }
+    for (UIView *subview in view.subviews) {
+        UITextField *field = DYStorageFindSettingsSearchField(subview, depth - 1);
+        if (field) return field;
+    }
+    return nil;
+}
+
+static BOOL DYStoragePrepareNativePluginSearch(UIViewController *controller, NSString *featureTitle) {
+    if (!controller || !featureTitle.length ||
+        objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey)) return NO;
+    UITextField *searchField = DYStorageFindSettingsSearchField(controller.viewIfLoaded, 16);
+    if (!searchField) return NO;
+    if (![searchField.text isEqualToString:featureTitle]) {
+        searchField.text = featureTitle;
+        [searchField sendActionsForControlEvents:UIControlEventEditingChanged];
+    }
+    return YES;
+}
+
+static NSArray<NSString *> *DYStorageNavigationRouteForFeature(NSString *plugin,
+                                                                NSDictionary *feature) {
+    id explicitRoute = feature[@"route"];
+    if ([explicitRoute isKindOfClass:[NSString class]] && [explicitRoute length]) {
+        return @[ explicitRoute ];
+    }
+    if ([explicitRoute isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSString *> *route = [NSMutableArray array];
+        for (id component in (NSArray *)explicitRoute) {
+            if ([component isKindOfClass:[NSString class]] && [component length]) {
+                [route addObject:component];
+            }
+        }
+        if (route.count) return route;
+    }
+
+    // The installed DYYY build constructs all search models while remaining on
+    // its root controller, so the scanner cannot observe the pushed page in
+    // pagePath. These section-to-page relationships are the real root menu
+    // callbacks used by DYYY and let DYStorage enter the correct second level
+    // before locating a switch, slider, or action row.
+    if (![plugin isEqualToString:@"DYYY"]) return @[];
+    NSString *section = feature[@"section"];
+    if (!section.length || [section isEqualToString:@"功能"] ||
+        [section isEqualToString:@"清理"] || [section isEqualToString:@"备份"] ||
+        [section isEqualToString:@"关于"]) {
+        return @[];
+    }
+
+    static NSDictionary<NSString *, NSString *> *pageBySection = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableDictionary<NSString *, NSString *> *mapping = [NSMutableDictionary dictionary];
+        NSDictionary<NSString *, NSArray<NSString *> *> *sectionsByPage = @{
+            @"基本设置": @[ @"外观设置", @"视频播放", @"播放控制", @"进度显示",
+                            @"弹幕", @"属地标签", @"直播", @"画质帧率", @"杂项设置",
+                            @"过滤与屏蔽", @"推荐过滤", @"隐私", @"二次确认", @"广告与弹窗" ],
+            @"界面设置": @[ @"首页布局", @"透明度设置", @"缩放与大小", @"标题自定义", @"图标自定义" ],
+            @"隐藏设置": @[ @"主界面元素", @"视频播放界面", @"侧边栏元素", @"消息页与我的页",
+                            @"提示与位置信息", @"直播间界面", @"隐藏面板功能", @"隐藏长按评论功能" ],
+            @"顶栏移除": @[ @"顶栏选项" ],
+            @"增强设置": @[ @"长按面板设置", @"媒体保存", @"交互增强", @"账号与登录", @"ABTest" ],
+            @"悬浮按钮": @[ @"快捷倍速", @"一键清屏" ]
+        };
+        [sectionsByPage enumerateKeysAndObjectsUsingBlock:^(NSString *page,
+                                                            NSArray<NSString *> *sections,
+                                                            __unused BOOL *stop) {
+            for (NSString *name in sections) mapping[name] = page;
+        }];
+        pageBySection = [mapping copy];
+    });
+    NSString *page = pageBySection[section];
+    return page.length ? @[ page ] : @[];
+}
+
+static NSArray<NSString *> *DYStorageFloatingRouteCandidatesForFeature(NSString *plugin,
+                                                                        NSString *featureTitle) {
+    if ([plugin isEqualToString:@"抖音助手"]) {
+        NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+        NSString *title = DYStorageNormalizedFeatureText(featureTitle);
+        if ([title hasPrefix:@"隐藏"]) {
+            [candidates addObject:@"隐藏设置"];
+        } else if ([title hasPrefix:@"移除"]) {
+            [candidates addObject:@"移除顶栏"];
+        } else if ([title hasPrefix:@"设置"] || [title hasPrefix:@"时间"] ||
+                   [title hasPrefix:@"时长"] || [title hasPrefix:@"显示"] ||
+                   [title hasPrefix:@"作品日期"]) {
+            [candidates addObject:@"界面设置"];
+        } else {
+            [candidates addObject:@"增强设置"];
+        }
+        for (NSString *fallback in @[ @"增强设置", @"界面设置", @"隐藏设置", @"移除顶栏" ]) {
+            if (![candidates containsObject:fallback]) [candidates addObject:fallback];
+        }
+        return candidates;
+    }
+    if ([plugin isEqualToString:@"抖音图层"]) {
+        // AwemeX's floating root contains four custom category rows. Prefer the
+        // category implied by the scanned title, then keep the others as
+        // fallbacks for renamed/regrouped options in later plug-in releases.
+        NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+        NSString *title = DYStorageNormalizedFeatureText(featureTitle);
+        if ([title containsString:@"透明度"]) {
+            [candidates addObject:@"透明度"];
+        } else if ([title hasPrefix:@"移除"]) {
+            [candidates addObject:@"移除项"];
+        } else if ([title hasPrefix:@"隐藏"]) {
+            [candidates addObject:@"隐藏项"];
+        } else {
+            [candidates addObject:@"增强项"];
+        }
+        for (NSString *fallback in @[ @"增强项", @"透明度", @"移除项", @"隐藏项" ]) {
+            if (![candidates containsObject:fallback]) [candidates addObject:fallback];
+        }
+        return candidates;
+    }
+    return @[];
+}
+
+static BOOL DYStorageInvokeSettingsNavigationItem(UIViewController *controller,
+                                                   NSString *title) {
+    if (!controller || !title.length ||
+        objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey)) return NO;
+    NSString *normalizedTitle = DYStorageNormalizedString(title);
+    id viewModel = DYStorageValue(controller, @"viewModel");
+    for (id section in DYStorageArrayValue(viewModel, @"sectionDataArray")) {
+        for (id item in DYStorageArrayValue(section, @"itemArray")) {
+            if (![DYStorageNormalizedString(DYStorageStringValue(item, @"title"))
+                    isEqualToString:normalizedTitle]) continue;
+            NSNumber *cellType = DYStorageValue(item, @"cellType");
+            id actionObject = DYStorageValue(item, @"cellTappedBlock");
+            BOOL navigationCell = ![cellType isKindOfClass:[NSNumber class]] ||
+                cellType.integerValue == 26;
+            if (!navigationCell || ![NSStringFromClass([actionObject class]) containsString:@"Block"]) continue;
+            DYStorageAction action = [(DYStorageAction)actionObject copy];
+            @try {
+                action();
+                return YES;
+            } @catch (__unused NSException *exception) {
+                return NO;
+            }
+        }
+    }
+    return NO;
+}
+
+static BOOL DYStorageFeatureRouteIsReady(UIViewController *controller,
+                                         UIViewController *sourceController) {
+    NSArray<NSString *> *route = gDYStoragePendingFeatureRoute;
+    if (route.count == 0) return YES;
+    if (!controller || controller == sourceController) return NO;
+
+    while (gDYStoragePendingFeatureRouteIndex < route.count) {
+        NSString *routeTitle = route[gDYStoragePendingFeatureRouteIndex];
+        NSString *controllerTitle = DYStorageNormalizedString(controller.title ?: controller.navigationItem.title);
+        if ([controllerTitle isEqualToString:DYStorageNormalizedString(routeTitle)]) {
+            gDYStoragePendingFeatureRouteIndex += 1;
+            gDYStorageLastRouteController = nil;
+            continue;
+        }
+        if (controller == gDYStorageLastRouteController) return NO;
+        if (!DYStorageInvokeSettingsNavigationItem(controller, routeTitle)) return NO;
+        gDYStoragePendingFeatureRouteIndex += 1;
+        gDYStorageLastRouteController = controller;
+        return NO;
+    }
+
+    // A route action normally pushes/presents the destination asynchronously.
+    // Do not search the root model during that transition: it may contain a
+    // prebuilt global index and would falsely report the feature as resolved.
+    return controller != gDYStorageLastRouteController;
+}
+
+static void DYStorageClearPendingFeatureNavigation(NSUInteger generation) {
+    if (generation != gDYStorageFeatureNavigationGeneration) return;
+    ++gDYStorageFeatureNavigationGeneration;
+    gDYStoragePendingSourceController = nil;
+    gDYStoragePendingFeatureSection = nil;
+    gDYStoragePendingFeatureTitle = nil;
+    gDYStoragePendingFeatureRoute = nil;
+    gDYStoragePendingFeatureRouteIndex = 0;
+    gDYStorageLastRouteController = nil;
+    gDYStoragePendingFloatingRouteCandidates = nil;
+    gDYStoragePendingFloatingRouteIndex = 0;
+}
+
+static BOOL DYStorageResolveFeatureInController(UIViewController *controller,
+                                                UIViewController *sourceController,
+                                                NSString *section,
+                                                NSString *title) {
+    if (!controller || controller == sourceController) return NO;
+    if (!DYStorageFeatureRouteIsReady(controller, sourceController)) return NO;
+    if (DYStorageLocateFeatureInSettingsController(controller, section, title)) return YES;
+    // DYYY builds its real search entries from the original item models. Feed
+    // the requested title into that native search first; a following pass can
+    // then invoke/locate the exact original item instead of a static proxy.
+    DYStoragePrepareNativePluginSearch(controller, title);
+    return NO;
+}
+
+static BOOL DYStorageTryLocateFeature(UIViewController *sourceController,
+                                      NSString *section,
+                                      NSString *title) {
+    UIViewController *topController = DYStorageTopViewController(nil);
+    if (DYStorageResolveFeatureInController(topController, sourceController, section, title)) {
+        return YES;
+    }
+    if (DYStorageLocateFeatureInVisibleWindows(sourceController, title)) return YES;
+
+    // Floating plug-ins do not push a UIViewController, so viewDidAppear cannot
+    // advance their internal pages. Select one known-safe category/config row
+    // per retry, then let the next retry locate the target in the updated table.
+    NSUInteger startIndex = gDYStoragePendingFloatingRouteIndex;
+    for (NSUInteger index = startIndex;
+         index < gDYStoragePendingFloatingRouteCandidates.count;
+         index++) {
+        NSString *candidate = gDYStoragePendingFloatingRouteCandidates[index];
+        if (!DYStorageActivateFloatingRouteInVisibleWindows(sourceController, candidate)) continue;
+        gDYStoragePendingFloatingRouteIndex = index + 1;
+        break;
+    }
+    return NO;
+}
+
+static void DYStorageResolvePendingFeatureForController(UIViewController *controller) {
+    NSUInteger generation = gDYStorageFeatureNavigationGeneration;
+    NSString *section = gDYStoragePendingFeatureSection;
+    NSString *title = gDYStoragePendingFeatureTitle;
+    UIViewController *sourceController = gDYStoragePendingSourceController;
+    if (!controller || !title.length || controller == sourceController) return;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        if (generation != gDYStorageFeatureNavigationGeneration) return;
+        if (DYStorageResolveFeatureInController(controller, sourceController, section, title)) {
+            DYStorageClearPendingFeatureNavigation(generation);
+            return;
+        }
+        // Native plug-in search updates sectionDataArray synchronously in most
+        // versions, but allow one table reload/layout turn before resolving.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.18 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (generation != gDYStorageFeatureNavigationGeneration) return;
+            if (DYStorageResolveFeatureInController(controller, sourceController, section, title)) {
+                DYStorageClearPendingFeatureNavigation(generation);
+            }
+        });
+    });
+}
+
+static void DYStorageOpenAndLocateFeature(UIViewController *sourceController,
+                                          DYStorageAction openPlugin,
+                                          NSString *plugin,
+                                          NSArray<NSString *> *route,
+                                          NSString *section,
+                                          NSString *title) {
+    if (!openPlugin) return;
+    NSUInteger generation = ++gDYStorageFeatureNavigationGeneration;
+    gDYStoragePendingSourceController = sourceController;
+    gDYStoragePendingFeatureSection = [section copy];
+    gDYStoragePendingFeatureTitle = [title copy];
+    gDYStoragePendingFeatureRoute = [route copy] ?: @[];
+    gDYStoragePendingFeatureRouteIndex = 0;
+    gDYStorageLastRouteController = nil;
+    gDYStoragePendingFloatingRouteCandidates =
+        [DYStorageFloatingRouteCandidatesForFeature(plugin, title) copy];
+    gDYStoragePendingFloatingRouteIndex = 0;
+    openPlugin();
+
+    __weak UIViewController *weakSourceController = sourceController;
+    for (NSNumber *delay in @[ @0.18, @0.45, @0.85, @1.35, @2.1, @3.0, @4.5, @6.0 ]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            if (generation != gDYStorageFeatureNavigationGeneration) return;
+            if (!DYStorageTryLocateFeature(weakSourceController, section, title)) return;
+            DYStorageClearPendingFeatureNavigation(generation);
+        });
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(7.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        DYStorageClearPendingFeatureNavigation(generation);
+    });
+}
+
+static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewController *sourceController) {
+    NSString *query = [searchText stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (query.length == 0) return DYStorageHubSections();
+
+    NSDictionary<NSString *, NSDictionary *> *targets = DYStorageInstalledSearchTargets();
+    NSMutableDictionary<NSString *, NSMutableArray *> *groupedItems = [NSMutableDictionary dictionary];
+    NSMutableArray<NSString *> *orderedPaths = [NSMutableArray array];
+    NSUInteger resultIndex = 0;
+
+    for (NSDictionary *catalogEntry in DYStorageSearchCatalog()) {
+        NSString *plugin = catalogEntry[@"plugin"];
+        NSDictionary *target = targets[plugin];
+        DYStorageAction action = (DYStorageAction)target[@"action"];
+        if (plugin.length == 0 || !action) continue;
+
+        NSArray<NSString *> *aliases = catalogEntry[@"aliases"] ?: @[];
+        for (NSDictionary *feature in catalogEntry[@"features"]) {
+            NSString *title = feature[@"title"];
+            NSString *section = feature[@"section"] ?: @"功能";
+            NSArray<NSString *> *route = DYStorageNavigationRouteForFeature(plugin, feature);
+            // DYYY's scanned model contained XUU's independently injected root
+            // entry. It is not a DYYY feature and must not appear unless the
+            // actual assistant plug-in is installed as its own catalog target.
+            if ([plugin isEqualToString:@"DYYY"] &&
+                ([section hasPrefix:@"XUU"] || [section hasPrefix:@"𝙓𝙐𝙐"] ||
+                 DYStorageTitleMatchesCatalogAlias(title, @"抖音助手"))) {
+                continue;
+            }
+            NSMutableArray<NSString *> *searchable = [NSMutableArray arrayWithObjects:plugin, section, title ?: @"", nil];
+            [searchable addObjectsFromArray:aliases];
+            if (!DYStorageSearchTextMatches(query, searchable)) continue;
+
+            NSString *path = section.length ? [NSString stringWithFormat:@"%@ - %@", plugin, section] : plugin;
+            NSMutableArray *items = groupedItems[path];
+            if (!items) {
+                items = [NSMutableArray array];
+                groupedItems[path] = items;
+                [orderedPaths addObject:path];
+            }
+            NSString *identifier = [NSString stringWithFormat:@"com.xlzs001.dystorage.search.%lu", (unsigned long)resultIndex++];
+            __weak UIViewController *weakSourceController = sourceController;
+            DYStorageAction resultAction = ^{
+                DYStorageOpenAndLocateFeature(weakSourceController, action, plugin, route, section, title);
+            };
+            id resultItem = DYStorageMakeItem(identifier,
+                                              title ?: @"未命名功能",
+                                              [NSString stringWithFormat:@"点击定位 %@ 中的此功能", target[@"installedTitle"] ?: plugin],
+                                              target[@"icon"],
+                                              resultAction);
+            if (resultItem) [items addObject:resultItem];
+        }
+    }
+
+    NSMutableArray *sections = [NSMutableArray array];
+    for (NSString *path in orderedPaths) {
+        NSArray *items = groupedItems[path];
+        if (items.count == 0) continue;
+        NSString *identifier = [NSString stringWithFormat:@"com.xlzs001.dystorage.search.section.%lu",
+                                  (unsigned long)sections.count];
+        id section = DYStorageMakeSection(identifier, path, items);
+        if (section) [sections addObject:section];
+    }
+
+    if (sections.count == 0) {
+        NSString *detail = targets.count
+            ? @"请尝试其他关键词"
+            : @"当前没有已安装且已建立搜索目录的插件";
+        id emptyItem = DYStorageMakeItem(@"com.xlzs001.dystorage.search.empty",
+                                         @"未找到相关设置",
+                                         detail,
+                                         @"ic_search_outlined_20",
+                                         nil);
+        id emptySection = DYStorageMakeSection(@"com.xlzs001.dystorage.search.empty-section",
+                                                @"聚合搜索",
+                                                emptyItem ? @[ emptyItem ] : @[]);
+        if (emptySection) [sections addObject:emptySection];
+    }
+    return sections;
+}
+
+static void DYStorageInstallAggregateSearch(UIViewController *controller) {
+    if (!controller || objc_getAssociatedObject(controller, kDYStorageSearchCoordinatorAssociationKey)) return;
+    id viewModel = objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey);
+    if (!viewModel) return;
+    __weak UIViewController *weakController = controller;
+    DYStorageSearchCoordinator *coordinator =
+        [DYStorageSearchCoordinator installOnController:controller
+                                               viewModel:viewModel
+                                        sectionsProvider:^NSArray *(NSString *query) {
+                                            return DYStorageAggregateSearchSections(query, weakController);
+                                        }];
+    if (coordinator) {
+        objc_setAssociatedObject(controller,
+                                 kDYStorageSearchCoordinatorAssociationKey,
+                                 coordinator,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
 static UIView *DYStorageMakeAboutFooter(void) {
     UIView *footer = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 0, 112)];
     footer.backgroundColor = UIColor.clearColor;
+    footer.accessibilityIdentifier = @"DYStorageAboutFooter";
 
     UILabel *(^label)(NSString *, CGFloat) = ^UILabel *(NSString *text, CGFloat size) {
         UILabel *view = [[UILabel alloc] init];
@@ -458,6 +1335,11 @@ static void DYStorageInstallAboutFooter(UIViewController *controller) {
 static NSArray *DYStorageHubSections(void) {
     DYStorageManager *manager = [DYStorageManager sharedManager];
     DYStorageDeveloperScanner *scanner = [DYStorageDeveloperScanner sharedScanner];
+    BOOL developerUIEnabled = DYStorageDeveloperUIEnabled();
+    // A scan uses a repeating main-run-loop timer. If developer mode was
+    // disabled while a scan was active, stop it here so a hidden scanner can
+    // never keep traversing the complete window hierarchy indefinitely.
+    if (!developerUIEnabled && scanner.isScanning) [scanner stopScanning];
     NSArray *capturedItems = [manager capturedSettingsItems];
     NSArray<DYStorageRegistration *> *registeredPlugins = [manager registeredPlugins];
     NSMutableArray *sections = [NSMutableArray array];
@@ -517,43 +1399,45 @@ static NSArray *DYStorageHubSections(void) {
         if (registeredSection) [sections addObject:registeredSection];
     }
 
-    NSString *scannerTitle = scanner.isScanning ? @"结束扫描并导出" : @"开发者扫描";
-    NSString *scannerDetail = scanner.isScanning
-        ? [NSString stringWithFormat:@"已记录 %lu 个功能，点击生成 JSON", (unsigned long)scanner.recordCount]
-        : @"记录插件设置页中的功能名称和位置";
-    id scannerItem = DYStorageMakeItem(@"com.xlzs001.dystorage.developer-scan",
-                                       scannerTitle,
-                                       scannerDetail,
-                                       @"ic_search_outlined_20",
-                                       ^{
-                                           DYStorageDeveloperScanner *activeScanner = [DYStorageDeveloperScanner sharedScanner];
-                                           UIViewController *presenter = DYStorageTopViewController(nil);
-                                           if (!activeScanner.isScanning) {
-                                               [activeScanner startNewScan];
-                                               UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开发者扫描已开始"
-                                                                                                              message:@"请一次只打开一个插件，展开所有分类并缓慢滚动到底部；每个页面停留约 1 秒。悬浮窗会优先扫描最上层窗口。完成后返回 DYStorage，点击“结束扫描并导出”。"
-                                                                                                       preferredStyle:UIAlertControllerStyleAlert];
-                                               [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
-                                               [presenter presentViewController:alert animated:YES completion:nil];
-                                               DYStorageRefreshHubController(presenter);
-                                               return;
-                                           }
+    if (developerUIEnabled) {
+        NSString *scannerTitle = scanner.isScanning ? @"结束扫描并导出" : @"开发者扫描";
+        NSString *scannerDetail = scanner.isScanning
+            ? [NSString stringWithFormat:@"已记录 %lu 个功能，点击生成 JSON", (unsigned long)scanner.recordCount]
+            : @"记录插件设置页中的功能名称和位置";
+        id scannerItem = DYStorageMakeItem(@"com.xlzs001.dystorage.developer-scan",
+                                           scannerTitle,
+                                           scannerDetail,
+                                           @"ic_search_outlined_20",
+                                           ^{
+                                               DYStorageDeveloperScanner *activeScanner = [DYStorageDeveloperScanner sharedScanner];
+                                               UIViewController *presenter = DYStorageTopViewController(nil);
+                                               if (!activeScanner.isScanning) {
+                                                   [activeScanner startNewScan];
+                                                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开发者扫描已开始"
+                                                                                                                  message:@"请一次只打开一个插件，展开所有分类并缓慢滚动到底部；每个页面停留约 1 秒。悬浮窗会优先扫描最上层窗口。完成后返回 DYStorage，点击“结束扫描并导出”。"
+                                                                                                           preferredStyle:UIAlertControllerStyleAlert];
+                                                   [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+                                                   [presenter presentViewController:alert animated:YES completion:nil];
+                                                   DYStorageRefreshHubController(presenter);
+                                                   return;
+                                               }
 
-                                           [activeScanner stopScanning];
-                                           NSError *error = nil;
-                                           if (![activeScanner exportReportFromController:presenter error:&error]) {
-                                               UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导出失败"
-                                                                                                              message:error.localizedDescription ?: @"无法生成扫描数据"
-                                                                                                       preferredStyle:UIAlertControllerStyleAlert];
-                                               [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
-                                               [presenter presentViewController:alert animated:YES completion:nil];
-                                           }
-                                           DYStorageRefreshHubController(presenter);
-                                       });
-    id scannerSection = DYStorageMakeSection(@"com.xlzs001.dystorage.developer-tools",
-                                             @"开发者工具",
-                                             scannerItem ? @[ scannerItem ] : @[]);
-    if (scannerSection) [sections addObject:scannerSection];
+                                               [activeScanner stopScanning];
+                                               NSError *error = nil;
+                                               if (![activeScanner exportReportFromController:presenter error:&error]) {
+                                                   UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导出失败"
+                                                                                                                  message:error.localizedDescription ?: @"无法生成扫描数据"
+                                                                                                           preferredStyle:UIAlertControllerStyleAlert];
+                                                   [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                                                   [presenter presentViewController:alert animated:YES completion:nil];
+                                               }
+                                               DYStorageRefreshHubController(presenter);
+                                           });
+        id scannerSection = DYStorageMakeSection(@"com.xlzs001.dystorage.developer-tools",
+                                                 @"开发者工具",
+                                                 scannerItem ? @[ scannerItem ] : @[]);
+        if (scannerSection) [sections addObject:scannerSection];
+    }
 
     if (capturedItems.count == 0 && registeredItems.count == 0) {
         id emptyItem = DYStorageMakeItem(@"com.xlzs001.dystorage.empty",
@@ -570,8 +1454,20 @@ static NSArray *DYStorageHubSections(void) {
 static void DYStorageRefreshHubController(UIViewController *controller) {
     id viewModel = objc_getAssociatedObject(controller, kDYStorageViewModelAssociationKey);
     if (!viewModel) return;
+    DYStorageSearchCoordinator *coordinator =
+        objc_getAssociatedObject(controller, kDYStorageSearchCoordinatorAssociationKey);
+    if (coordinator) {
+        // The coordinator owns the current normal/search query. Let it build
+        // and install the model once instead of replacing it twice on every
+        // appearance of the organizer page.
+        [coordinator refreshWithCurrentQuery];
+        return;
+    }
+
     DYStorageSetValue(viewModel, DYStorageHubSections(), @"sectionDataArray");
-    if (controller.isViewLoaded) DYStorageReloadListsInView(controller.view, 5);
+    if (controller.isViewLoaded) {
+        DYStorageReloadListsInView(controller.view, 5);
+    }
 }
 
 static void DYStorageShowHub(UIViewController *rootController) {
@@ -833,6 +1729,7 @@ static void DYStorageInstallAvailableHooks(void);
     gDYStorageHubPageVisible = YES;
     DYStorageRefreshHubController((UIViewController *)self);
     DYStorageInstallAboutFooter((UIViewController *)self);
+    DYStorageInstallAggregateSearch((UIViewController *)self);
 }
 
 - (void)viewDidAppear:(BOOL)animated {
@@ -841,8 +1738,17 @@ static void DYStorageInstallAvailableHooks(void);
     if (customViewModel) {
         gDYStorageHubPageVisible = YES;
         DYStorageRefreshHubController((UIViewController *)self);
+        DYStorageInstallAggregateSearch((UIViewController *)self);
+        DYStorageSearchCoordinator *coordinator =
+            objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+        [coordinator pageDidAppear];
         return;
     }
+
+    // A cross-plug-in search result may open this controller asynchronously.
+    // Resolve the pending feature against this exact controller instead of
+    // guessing which application window is currently key.
+    DYStorageResolvePendingFeatureForController((UIViewController *)self);
 
     if ([DYStorageDeveloperScanner sharedScanner].isScanning) {
         __weak UIViewController *weakController = (UIViewController *)self;
@@ -857,9 +1763,21 @@ static void DYStorageInstallAvailableHooks(void);
     }
 }
 
+- (void)viewDidLayoutSubviews {
+    %orig;
+    if (!objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) return;
+    DYStorageSearchCoordinator *coordinator =
+        objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+    [coordinator updateLayout];
+}
+
 - (void)viewDidDisappear:(BOOL)animated {
     %orig;
     if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+        DYStorageSearchCoordinator *coordinator =
+            objc_getAssociatedObject(self, kDYStorageSearchCoordinatorAssociationKey);
+        [coordinator pageDidDisappear];
+        [[(UIViewController *)self viewIfLoaded] endEditing:YES];
         gDYStorageHubPageVisible = NO;
     }
 }
