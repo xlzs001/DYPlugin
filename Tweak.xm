@@ -10,6 +10,7 @@
 #import <objc/runtime.h>
 
 #import "DYStorageManager.h"
+#import "DYStorageDeveloperScanner.h"
 
 #ifndef DY_STORAGE_DEBUG
 #define DY_STORAGE_DEBUG 0
@@ -39,6 +40,8 @@ static BOOL gDYStorageHubInsertedOnMainSettings = NO;
 static BOOL gDYStorageHubPageVisible = NO;
 static BOOL gDYStorageOrganizingMainSections = NO;
 static BOOL gDYStorageCheckingFallbackHeader = NO;
+
+static void DYStorageRefreshHubController(UIViewController *controller);
 
 #pragma mark - Runtime-safe model access
 
@@ -235,7 +238,7 @@ static BOOL DYStorageSectionIsHub(id section) {
 
     // `identifier` is not present in a few older setting-model builds. In that
     // case fall back to a narrowly-scoped title plus our entry identifier.
-    if (![DYStorageStringValue(section, @"sectionHeaderTitle") isEqualToString:@"插件收纳"]) return NO;
+    if (![DYStorageStringValue(section, @"sectionHeaderTitle") isEqualToString:@"DYStorage"]) return NO;
     for (id item in DYStorageArrayValue(section, @"itemArray")) {
         if (DYStorageItemIsHubEntry(item)) return YES;
     }
@@ -491,7 +494,46 @@ static NSArray *DYStorageHubSections(void) {
         if (registeredSection) [sections addObject:registeredSection];
     }
 
-    if (sections.count == 0) {
+    DYStorageDeveloperScanner *scanner = [DYStorageDeveloperScanner sharedScanner];
+    NSString *scannerTitle = scanner.isScanning ? @"结束扫描并导出" : @"开发者扫描";
+    NSString *scannerDetail = scanner.isScanning
+        ? [NSString stringWithFormat:@"已记录 %lu 个功能，点击生成 JSON", (unsigned long)scanner.recordCount]
+        : @"记录插件设置页中的功能名称和位置";
+    id scannerItem = DYStorageMakeItem(@"com.xlzs001.dystorage.developer-scan",
+                                       scannerTitle,
+                                       scannerDetail,
+                                       @"ic_search_outlined_20",
+                                       ^{
+                                           DYStorageDeveloperScanner *activeScanner = [DYStorageDeveloperScanner sharedScanner];
+                                           UIViewController *presenter = DYStorageTopViewController(nil);
+                                           if (!activeScanner.isScanning) {
+                                               [activeScanner startNewScan];
+                                               UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"开发者扫描已开始"
+                                                                                                              message:@"请依次进入每个已收纳插件及其所有子页面。扫描只记录设置项名称、页面位置和已加载的插件 dylib；完成后返回 DYStorage，点击“结束扫描并导出”。"
+                                                                                                       preferredStyle:UIAlertControllerStyleAlert];
+                                               [alert addAction:[UIAlertAction actionWithTitle:@"知道了" style:UIAlertActionStyleDefault handler:nil]];
+                                               [presenter presentViewController:alert animated:YES completion:nil];
+                                               DYStorageRefreshHubController(presenter);
+                                               return;
+                                           }
+
+                                           [activeScanner stopScanning];
+                                           NSError *error = nil;
+                                           if (![activeScanner exportReportFromController:presenter error:&error]) {
+                                               UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"导出失败"
+                                                                                                              message:error.localizedDescription ?: @"无法生成扫描数据"
+                                                                                                       preferredStyle:UIAlertControllerStyleAlert];
+                                               [alert addAction:[UIAlertAction actionWithTitle:@"确定" style:UIAlertActionStyleDefault handler:nil]];
+                                               [presenter presentViewController:alert animated:YES completion:nil];
+                                           }
+                                           DYStorageRefreshHubController(presenter);
+                                       });
+    id scannerSection = DYStorageMakeSection(@"com.xlzs001.dystorage.developer-tools",
+                                             @"开发者工具",
+                                             scannerItem ? @[ scannerItem ] : @[]);
+    if (scannerSection) [sections addObject:scannerSection];
+
+    if (capturedItems.count == 0 && registeredItems.count == 0) {
         id emptyItem = DYStorageMakeItem(@"com.xlzs001.dystorage.empty",
                                          @"暂无可收纳的插件",
                                          @"打开抖音设置后会自动识别已安装的兼容插件",
@@ -527,7 +569,7 @@ static void DYStorageShowHub(UIViewController *rootController) {
                                  kDYStorageViewModelAssociationKey,
                                  viewModel,
                                  OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        controller.title = @"插件收纳";
+        controller.title = @"DYStorage";
         DYStoragePresentController(controller, rootController);
     };
     if ([NSThread isMainThread]) show();
@@ -594,7 +636,7 @@ static id DYStorageMakeHubEntrySection(id viewModel) {
                                      UIViewController *root = DYStorageValue(weakViewModel, @"controllerDelegate");
                                      DYStorageShowHub(root);
                                  });
-    return entry ? DYStorageMakeSection(kDYStorageHubSectionIdentifier, @"插件收纳", @[ entry ]) : nil;
+    return entry ? DYStorageMakeSection(kDYStorageHubSectionIdentifier, @"DYStorage", @[ entry ]) : nil;
 }
 
 static NSArray *DYStorageOrganizedMainSections(id viewModel, NSArray *originalSections) {
@@ -765,7 +807,7 @@ static void DYStorageInstallAvailableHooks(void);
 - (void)viewDidLoad {
     %orig;
     if (!objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) return;
-    [(UIViewController *)self setTitle:@"插件收纳"];
+    [(UIViewController *)self setTitle:@"DYStorage"];
     gDYStorageHubPageVisible = YES;
     DYStorageRefreshHubController((UIViewController *)self);
     DYStorageInstallAboutFooter((UIViewController *)self);
@@ -773,9 +815,23 @@ static void DYStorageInstallAvailableHooks(void);
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    if (objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey)) {
+    id customViewModel = objc_getAssociatedObject(self, kDYStorageViewModelAssociationKey);
+    if (customViewModel) {
         gDYStorageHubPageVisible = YES;
         DYStorageRefreshHubController((UIViewController *)self);
+        return;
+    }
+
+    if ([DYStorageDeveloperScanner sharedScanner].isScanning) {
+        __weak UIViewController *weakController = (UIViewController *)self;
+        for (NSNumber *delay in @[ @0.25, @1.0 ]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay.doubleValue * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                UIViewController *controller = weakController;
+                if (!controller || ![DYStorageDeveloperScanner sharedScanner].isScanning) return;
+                id viewModel = DYStorageValue(controller, @"viewModel");
+                [[DYStorageDeveloperScanner sharedScanner] captureSettingsController:controller viewModel:viewModel];
+            });
+        }
     }
 }
 

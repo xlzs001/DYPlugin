@@ -1,37 +1,47 @@
 name: Build DYStorage
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
   build:
-    name: Build package
+    name: Build packages
     runs-on: macos-latest
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v6
         with:
           submodules: true
+          fetch-depth: 0
 
       - name: Check Theos cache
         run: |
           echo "upstream_heads=$(git ls-remote https://github.com/roothide/theos | head -n 1 | cut -f 1)-$(git ls-remote https://github.com/theos/sdks | head -n 1 | cut -f 1)" >> "$GITHUB_ENV"
 
       - name: Use Theos cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ${{ github.workspace }}/theos
           key: ${{ runner.os }}-${{ env.upstream_heads }}
+
+      - name: Remove unused Homebrew taps
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+          HOMEBREW_NO_AUTOREMOVE: "1"
+        run: |
+          if brew list --formula | grep -Fxq "bicep"; then
+            brew uninstall --formula --ignore-dependencies bicep
+          fi
+          for tap in aws/tap azure/bicep; do
+            if brew tap | grep -Fxq "$tap"; then
+              brew untap "$tap"
+            fi
+          done
 
       - name: Prepare Theos
         uses: huami1314/theos-action@main
@@ -41,45 +51,82 @@ jobs:
 
       - name: Set incrementing package version
         run: |
-          base_version="$(awk '/^Version:/ { print $2; exit }' control)"
+          base_version="$(awk -F': ' '$1 == "Version" { print $2; exit }' control)"
           base_prefix="${base_version%.*}"
           build_version="${base_prefix}.${GITHUB_RUN_NUMBER}"
           sed -i '' -E "s/^Version:.*/Version: ${build_version}/" control
           sed -i '' -E "s#kDYStorageVersion = @\"[^\"]*\"#kDYStorageVersion = @\"${build_version}\"#" Tweak.xm
           echo "Building DYStorage version ${build_version}"
 
-      - name: Build package
+      - name: Clean packages directory
+        run: rm -rf packages && mkdir -p packages
+
+      - name: Build Rootful
         run: |
-          rm -rf .theos packages output_packages
-          mkdir -p output_packages
+          make package SCHEME=rootful FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          for f in packages/*.deb; do
+            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootful.deb"
+          done
 
-          make package FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          rootful_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$rootful_package"
-          version="$(awk '/^Version:/ { print $2; exit }' control)"
-          cp "$rootful_package" "output_packages/DYStorage_rootful_${version}.deb"
+      - name: Build Rootless
+        run: |
+          make package SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          for f in packages/*.deb; do
+            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-rootless.deb"
+          done
 
-          rm -rf packages .theos
-          make package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          rootless_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$rootless_package"
-          cp "$rootless_package" "output_packages/DYStorage_rootless_${version}.deb"
+      - name: Build Roothide
+        run: |
+          make package SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
+          for f in packages/*.deb; do
+            [ -f "$f" ] && [[ "$f" != *"-root"*".deb" ]] && mv "$f" "${f%.deb}-roothide.deb"
+          done
 
-          rm -rf packages .theos
-          make package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1 -j$(sysctl -n hw.ncpu)
-          roothide_package="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
-          test -n "$roothide_package"
-          cp "$roothide_package" "output_packages/DYStorage_roothide_${version}.deb"
+      - name: Prepare package metadata
+        id: package
+        run: |
+          timestamp=$(TZ=Asia/Shanghai date +%Y%m%d%H%M%S)
+          version=$(awk -F': ' '$1 == "Version" { print $2; exit }' control)
+          if [ -z "$version" ]; then
+            echo "Unable to read package version from control" >&2
+            exit 1
+          fi
+          echo "timestamp=$timestamp" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Stage versioned package
+      - name: Verify Deb packages
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find output_packages -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')" -eq 3
+          shopt -s nullglob
 
-      - name: Upload package
-        uses: actions/upload-artifact@v6
+          deb_files=(packages/*.deb)
+          if [ "${#deb_files[@]}" -ne 3 ]; then
+            echo "Expected 3 Deb packages, found ${#deb_files[@]}:" >&2
+            printf '  %s\n' "${deb_files[@]}" >&2
+            exit 1
+          fi
+
+          for scheme in rootful rootless roothide; do
+            scheme_files=(packages/*-"${scheme}".deb)
+            if [ "${#scheme_files[@]}" -ne 1 ]; then
+              echo "Expected exactly one ${scheme} package, found ${#scheme_files[@]}" >&2
+              exit 1
+            fi
+          done
+
+          printf 'Package artifact: %s\n' "${deb_files[@]}"
+
+      - name: Extract arm64 dylib
+        env:
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        run: bash .github/scripts/extract-release-dylib.sh
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v7
         with:
-          name: DYStorage-Packages
-          path: output_packages/*.deb
+          name: DYStorage-${{ steps.package.outputs.timestamp }}
+          path: |
+            ${{ github.workspace }}/packages/*.deb
+            ${{ github.workspace }}/packages/*.dylib
           if-no-files-found: error
