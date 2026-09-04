@@ -35,6 +35,8 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 @property (nonatomic) UIEdgeInsets originalIndicatorInset;
 @property (nonatomic) BOOL installedInsets;
 @property (nonatomic) NSUInteger pendingSearchGeneration;
+@property (nonatomic, copy) dispatch_block_t pendingSearchBlock;
+@property (nonatomic, copy) NSString *lastAppliedQuery;
 @property (nonatomic, weak) UINavigationController *navigationController;
 @property (nonatomic, strong) UIPanGestureRecognizer *searchBackGestureRecognizer;
 @property (nonatomic) BOOL previousInteractivePopGestureEnabled;
@@ -54,6 +56,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (BOOL)handleBackNavigationRequest;
 - (void)handleSearchBackGesture:(UIPanGestureRecognizer *)gestureRecognizer;
 - (void)searchTextDidChange:(UITextField *)textField;
+- (void)cancelPendingSearchRefresh;
 @end
 
 @implementation DYStorageSearchCoordinator
@@ -90,7 +93,10 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     self.searchTextField = [[UITextField alloc] initWithFrame:self.containerView.bounds];
     self.searchTextField.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.searchTextField.backgroundColor = UIColor.clearColor;
-    self.searchTextField.font = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    UIFont *baseFont = [UIFont systemFontOfSize:16 weight:UIFontWeightRegular];
+    self.searchTextField.font = [[UIFontMetrics metricsForTextStyle:UIFontTextStyleBody]
+        scaledFontForFont:baseFont];
+    self.searchTextField.adjustsFontForContentSizeCategory = YES;
     self.searchTextField.clearButtonMode = UITextFieldViewModeWhileEditing;
     self.searchTextField.returnKeyType = UIReturnKeySearch;
     self.searchTextField.autocorrectionType = UITextAutocorrectionTypeNo;
@@ -239,7 +245,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     // The first horizontal back swipe exits search and restores the complete hub.
     // A following swipe is handled by UINavigationController and returns to
     // Douyin settings, matching the two visible page levels.
-    ++self.pendingSearchGeneration;
+    [self cancelPendingSearchRefresh];
     self.searchTextField.text = @"";
     [self.searchTextField resignFirstResponder];
     [self refreshWithCurrentQuery];
@@ -286,11 +292,19 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 - (void)refreshWithCurrentQuery {
     if (!self.sectionsProvider || !self.viewModel) return;
     NSString *query = [self trimmedQuery];
+    BOOL queryChanged = ![query isEqualToString:self.lastAppliedQuery ?: @""];
     [self updateSupplementaryViewsForQuery:query];
     NSArray *sections = self.sectionsProvider(query) ?: @[];
     if (!DYStorageSearchSetValue(self.viewModel, sections, @"sectionDataArray")) return;
     UITableView *tableView = self.tableView;
     [tableView reloadData];
+    if (queryChanged && tableView) {
+        // Search is a high-frequency action. Reset immediately instead of
+        // animating the list on every character typed.
+        CGPoint topOffset = CGPointMake(tableView.contentOffset.x, -tableView.adjustedContentInset.top);
+        [tableView setContentOffset:topOffset animated:NO];
+    }
+    self.lastAppliedQuery = query;
 }
 
 - (void)searchTextDidChange:(__unused UITextField *)textField {
@@ -299,15 +313,25 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     // Building native private-setting models for hundreds of catalog entries
     // is deliberately kept off the per-keystroke hot path. Coalesce rapid
     // edits so only the final query refreshes the table.
-    NSUInteger generation = ++self.pendingSearchGeneration;
+    [self cancelPendingSearchRefresh];
+    NSUInteger generation = self.pendingSearchGeneration;
     __weak DYStorageSearchCoordinator *weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
+    dispatch_block_t searchBlock = dispatch_block_create(0, ^{
         DYStorageSearchCoordinator *strongSelf = weakSelf;
         if (!strongSelf || generation != strongSelf.pendingSearchGeneration) return;
         if (![strongSelf isTopController]) return;
+        strongSelf.pendingSearchBlock = nil;
         [strongSelf refreshWithCurrentQuery];
     });
+    self.pendingSearchBlock = searchBlock;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), searchBlock);
+}
+
+- (void)cancelPendingSearchRefresh {
+    if (self.pendingSearchBlock) dispatch_block_cancel(self.pendingSearchBlock);
+    self.pendingSearchBlock = nil;
+    ++self.pendingSearchGeneration;
 }
 
 - (void)updateLayout {
@@ -335,13 +359,9 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
         self.searchTextField.frame = self.containerView.bounds;
     }
 
-    // Reordering a subview on every layout pass can itself schedule additional
-    // layout work on some Douyin versions. Only reorder when another injected
-    // view has actually covered the search header.
-    if (self.headerView.superview == self.controller.view &&
-        self.controller.view.subviews.lastObject != self.headerView) {
-        [self.controller.view bringSubviewToFront:self.headerView];
-    }
+    // Do not force the search field to the front on every layout pass. Plug-in
+    // sheets and floating panels added later must remain above DYStorage, and
+    // repeated z-order mutations can trigger more layout work.
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
@@ -361,7 +381,7 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
     if (gestureRecognizer == self.searchBackGestureRecognizer) {
         if (![self isTopController] || ![self isSearchInteractionActive]) return NO;
         CGPoint velocity = [(UIPanGestureRecognizer *)gestureRecognizer velocityInView:gestureRecognizer.view];
-        return fabs(velocity.x) > fabs(velocity.y) * 1.15;
+        return velocity.x > fabs(velocity.y) * 1.15;
     }
     return YES;
 }
@@ -388,14 +408,14 @@ static BOOL DYStorageSearchSetValue(id object, id value, NSString *key) {
 }
 
 - (void)pageDidDisappear {
-    ++self.pendingSearchGeneration;
+    [self cancelPendingSearchRefresh];
     self.pageVisible = NO;
     self.handlingSearchBackGesture = NO;
     [self restoreNavigationGestureState];
 }
 
 - (void)dealloc {
-    ++_pendingSearchGeneration;
+    [self cancelPendingSearchRefresh];
     [self restoreNavigationGestureState];
     [_searchBackGestureRecognizer.view removeGestureRecognizer:_searchBackGestureRecognizer];
     [_searchTextField removeTarget:self action:@selector(searchTextDidChange:) forControlEvents:UIControlEventEditingChanged];

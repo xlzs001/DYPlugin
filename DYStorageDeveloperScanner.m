@@ -5,6 +5,8 @@
 #import <math.h>
 
 static const NSTimeInterval kDYScannerMaximumDuration = 30.0 * 60.0;
+static const NSTimeInterval kDYScannerInterval = 1.0;
+static const NSTimeInterval kDYScannerTimerTolerance = 0.25;
 static const NSUInteger kDYScannerMaximumSettingsRecords = 8000;
 static const NSUInteger kDYScannerMaximumVisibleTextRecords = 12000;
 static const NSUInteger kDYScannerMaximumControllerSamples = 512;
@@ -140,6 +142,10 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
                        isKeyWindow:(BOOL)isKeyWindow
                              depth:(NSInteger)depth;
 - (void)startScanTimer;
+- (void)invalidateScanTimer;
+- (BOOL)scanReachedMaximumDuration;
+- (void)applicationDidEnterBackground:(NSNotification *)notification;
+- (void)applicationDidBecomeActive:(NSNotification *)notification;
 @end
 
 @implementation DYStorageDeveloperScanner
@@ -159,8 +165,22 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
         _recordsByKey = [NSMutableDictionary dictionary];
         _visibleTextsByKey = [NSMutableDictionary dictionary];
         _controllerSamplesByKey = [NSMutableDictionary dictionary];
+        NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+        [center addObserver:self
+                   selector:@selector(applicationDidEnterBackground:)
+                       name:UIApplicationDidEnterBackgroundNotification
+                     object:nil];
+        [center addObserver:self
+                   selector:@selector(applicationDidBecomeActive:)
+                       name:UIApplicationDidBecomeActiveNotification
+                     object:nil];
     }
     return self;
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [self.scanTimer invalidate];
 }
 
 - (NSUInteger)recordCount {
@@ -186,8 +206,7 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
     @synchronized (self) {
         self.scanning = NO;
     }
-    [self.scanTimer invalidate];
-    self.scanTimer = nil;
+    [self invalidateScanTimer];
 }
 
 - (void)selectPluginWithTitle:(NSString *)pluginTitle {
@@ -207,30 +226,69 @@ static UIViewController *DYScannerTopControllerForWindow(UIWindow *window) {
         return;
     }
 
-    [self.scanTimer invalidate];
+    if (!self.isScanning || [self scanReachedMaximumDuration] ||
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+        [self invalidateScanTimer];
+        return;
+    }
+
+    [self invalidateScanTimer];
     __weak DYStorageDeveloperScanner *weakSelf = self;
-    self.scanTimer = [NSTimer timerWithTimeInterval:0.75 repeats:YES block:^(__unused NSTimer *timer) {
+    self.scanTimer = [NSTimer timerWithTimeInterval:kDYScannerInterval repeats:YES block:^(__unused NSTimer *timer) {
         DYStorageDeveloperScanner *strongSelf = weakSelf;
         if (!strongSelf) return;
-        if (strongSelf.startedAt &&
-            [[NSDate date] timeIntervalSinceDate:strongSelf.startedAt] >= kDYScannerMaximumDuration) {
+        if (!strongSelf.isScanning || [strongSelf scanReachedMaximumDuration] ||
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
             // Developer mode is normally hidden. If it is enabled manually and
-            // forgotten, stop the recursive timer but preserve `scanning` and
-            // all records so the next scanner tap can still export the report.
-            [strongSelf.scanTimer invalidate];
-            strongSelf.scanTimer = nil;
+            // forgotten, pause the timer but preserve `scanning` and all records
+            // so the next scanner tap can still export the report.
+            [strongSelf invalidateScanTimer];
             return;
         }
         @autoreleasepool {
             [strongSelf captureVisibleInterface];
         }
     }];
-    [[NSRunLoop mainRunLoop] addTimer:self.scanTimer forMode:NSRunLoopCommonModes];
+    self.scanTimer.tolerance = kDYScannerTimerTolerance;
+    // Do not traverse a plug-in's view tree while the user is actively
+    // dragging a long settings list. The default mode resumes immediately
+    // after tracking ends and keeps scrolling responsive.
+    [[NSRunLoop mainRunLoop] addTimer:self.scanTimer forMode:NSDefaultRunLoopMode];
     [self captureVisibleInterface];
 }
 
+- (void)invalidateScanTimer {
+    if (![NSThread isMainThread]) {
+        __weak DYStorageDeveloperScanner *weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf invalidateScanTimer];
+        });
+        return;
+    }
+    [self.scanTimer invalidate];
+    self.scanTimer = nil;
+}
+
+- (BOOL)scanReachedMaximumDuration {
+    NSDate *startedAt = nil;
+    @synchronized (self) {
+        startedAt = self.startedAt;
+    }
+    return startedAt && [[NSDate date] timeIntervalSinceDate:startedAt] >= kDYScannerMaximumDuration;
+}
+
+- (void)applicationDidEnterBackground:(__unused NSNotification *)notification {
+    // Aweme can remain alive for audio/background work. A developer scan must
+    // never keep traversing its complete view hierarchy while it is off-screen.
+    [self invalidateScanTimer];
+}
+
+- (void)applicationDidBecomeActive:(__unused NSNotification *)notification {
+    if (self.isScanning && ![self scanReachedMaximumDuration]) [self startScanTimer];
+}
+
 - (void)captureVisibleInterface {
-    if (!self.isScanning) return;
+    if (!self.isScanning || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
     NSArray<UIWindow *> *windows = DYScannerWindows();
     NSArray<UIWindow *> *frontmostWindows = DYScannerFrontmostWindows(windows);
     @synchronized (self) {

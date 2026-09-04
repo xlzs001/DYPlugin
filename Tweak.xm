@@ -45,6 +45,7 @@ static BOOL gDYStorageHubInsertedOnMainSettings = NO;
 static BOOL gDYStorageHubPageVisible = NO;
 static BOOL gDYStorageOrganizingMainSections = NO;
 static BOOL gDYStorageCheckingFallbackHeader = NO;
+static const NSUInteger kDYStorageMaximumSearchResults = 240;
 
 static void DYStorageRefreshHubController(UIViewController *controller);
 static NSArray *DYStorageHubSections(void);
@@ -101,6 +102,7 @@ static NSArray<UIWindow *> *DYStorageWindows(void) {
     if (@available(iOS 13.0, *)) {
         for (UIScene *scene in application.connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+            if (scene.activationState == UISceneActivationStateUnattached) continue;
             [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
         }
     }
@@ -114,10 +116,11 @@ static NSArray<UIWindow *> *DYStorageWindows(void) {
 }
 
 static UIWindow *DYStorageKeyWindow(void) {
-    for (UIWindow *window in DYStorageWindows()) {
+    NSArray<UIWindow *> *windows = DYStorageWindows();
+    for (UIWindow *window in windows) {
         if (window.isKeyWindow) return window;
     }
-    return [DYStorageWindows() firstObject];
+    return windows.firstObject;
 }
 
 static UIViewController *DYStorageTopViewController(UIViewController *rootController) {
@@ -190,15 +193,20 @@ static NSArray<NSString *> *DYStorageKnownPluginTitles(void) {
 }
 
 static NSArray<NSString *> *DYStorageTargetPluginTitles(void) {
-    NSMutableArray<NSString *> *titles = [DYStorageKnownPluginTitles() mutableCopy];
-    id customTitles = [[NSUserDefaults standardUserDefaults] objectForKey:@"DYStorageTargetPluginTitles"];
-    if ([customTitles isKindOfClass:[NSArray class]]) {
-        for (id title in (NSArray *)customTitles) {
-            if ([title isKindOfClass:[NSString class]] && ((NSString *)title).length) {
-                [titles addObject:title];
+    static NSArray<NSString *> *titles = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSMutableArray<NSString *> *values = [DYStorageKnownPluginTitles() mutableCopy];
+        id customTitles = [[NSUserDefaults standardUserDefaults] objectForKey:@"DYStorageTargetPluginTitles"];
+        if ([customTitles isKindOfClass:[NSArray class]]) {
+            for (id title in (NSArray *)customTitles) {
+                if ([title isKindOfClass:[NSString class]] && ((NSString *)title).length) {
+                    [values addObject:title];
+                }
             }
         }
-    }
+        titles = [values copy];
+    });
     return titles;
 }
 
@@ -513,6 +521,10 @@ static BOOL DYStorageMotionEffectsEnabled(void) {
     return !UIAccessibilityIsReduceMotionEnabled();
 }
 
+static BOOL DYStorageApplicationIsActive(void) {
+    return UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+}
+
 static void DYStoragePulseHighlightView(UIView *view) {
     if (!view || !view.window) return;
     UIView *previousOverlay = objc_getAssociatedObject(view, kDYStorageHighlightOverlayAssociationKey);
@@ -542,19 +554,23 @@ static void DYStoragePulseHighlightView(UIView *view) {
     };
     if (!DYStorageMotionEffectsEnabled()) {
         overlay.alpha = 1;
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)),
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.20 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), removeOverlay);
         return;
     }
 
-    [UIView animateWithDuration:0.12
-                          delay:0
-                        options:UIViewAnimationOptionBeginFromCurrentState | UIViewAnimationOptionAllowUserInteraction
-                     animations:^{ overlay.alpha = 1; }
-                     completion:^(__unused BOOL finished) {
-        [UIView animateWithDuration:0.34
-                              delay:0.06
-                            options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionAllowUserInteraction
+    [UIView animateWithDuration:0.10
+                           delay:0
+                         options:UIViewAnimationOptionCurveEaseOut |
+                                 UIViewAnimationOptionBeginFromCurrentState |
+                                 UIViewAnimationOptionAllowUserInteraction
+                      animations:^{ overlay.alpha = 1; }
+                      completion:^(__unused BOOL finished) {
+        [UIView animateWithDuration:0.20
+                               delay:0.08
+                             options:UIViewAnimationOptionCurveEaseOut |
+                                     UIViewAnimationOptionBeginFromCurrentState |
+                                     UIViewAnimationOptionAllowUserInteraction
                          animations:^{ overlay.alpha = 0; }
                          completion:^(__unused BOOL completed) { removeOverlay(); }];
     }];
@@ -1306,7 +1322,7 @@ static void DYStorageResolvePendingFeatureForController(UIViewController *contro
     NSString *section = gDYStoragePendingFeatureSection;
     NSString *title = gDYStoragePendingFeatureTitle;
     UIViewController *sourceController = gDYStoragePendingSourceController;
-    if (!controller || !title.length || controller == sourceController) return;
+    if (!controller || !title.length || controller == sourceController || !DYStorageApplicationIsActive()) return;
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.08 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
@@ -1346,6 +1362,10 @@ static void DYStorageScheduleFeatureRetry(UIViewController *sourceController,
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (generation != gDYStorageFeatureNavigationGeneration) return;
+        if (!DYStorageApplicationIsActive()) {
+            DYStorageClearPendingFeatureNavigation(generation);
+            return;
+        }
         UIViewController *strongSourceController = weakSourceController;
         if (!strongSourceController) {
             DYStorageClearPendingFeatureNavigation(generation);
@@ -1405,6 +1425,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
     NSMutableDictionary<NSString *, NSMutableArray *> *groupedItems = [NSMutableDictionary dictionary];
     NSMutableArray<NSString *> *orderedPaths = [NSMutableArray array];
     NSUInteger resultIndex = 0;
+    BOOL truncated = NO;
 
     for (NSDictionary *catalogEntry in DYStorageSearchCatalog()) {
         NSString *plugin = catalogEntry[@"plugin"];
@@ -1413,6 +1434,9 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
         if (plugin.length == 0 || !action) continue;
 
         NSArray<NSString *> *aliases = catalogEntry[@"aliases"] ?: @[];
+        NSMutableArray<NSString *> *pluginSearchable = [NSMutableArray arrayWithObject:plugin];
+        [pluginSearchable addObjectsFromArray:aliases];
+        BOOL pluginMatches = DYStorageSearchTextMatches(query, pluginSearchable);
         for (NSDictionary *feature in catalogEntry[@"features"]) {
             NSString *title = feature[@"title"];
             NSString *section = feature[@"section"] ?: @"功能";
@@ -1425,9 +1449,11 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
                  DYStorageTitleMatchesCatalogAlias(title, @"抖音助手"))) {
                 continue;
             }
-            NSMutableArray<NSString *> *searchable = [NSMutableArray arrayWithObjects:plugin, section, title ?: @"", nil];
-            [searchable addObjectsFromArray:aliases];
-            if (!DYStorageSearchTextMatches(query, searchable)) continue;
+            if (!pluginMatches && !DYStorageSearchTextMatches(query, @[ section, title ?: @"" ])) continue;
+            if (resultIndex >= kDYStorageMaximumSearchResults) {
+                truncated = YES;
+                break;
+            }
 
             NSString *path = section.length ? [NSString stringWithFormat:@"%@ - %@", plugin, section] : plugin;
             NSMutableArray *items = groupedItems[path];
@@ -1448,6 +1474,7 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
                                               resultAction);
             if (resultItem) [items addObject:resultItem];
         }
+        if (truncated) break;
     }
 
     NSMutableArray *sections = [NSMutableArray array];
@@ -1458,6 +1485,18 @@ static NSArray *DYStorageAggregateSearchSections(NSString *searchText, UIViewCon
                                   (unsigned long)sections.count];
         id section = DYStorageMakeSection(identifier, path, items);
         if (section) [sections addObject:section];
+    }
+
+    if (truncated) {
+        id limitItem = DYStorageMakeItem(@"com.xlzs001.dystorage.search.limit",
+                                         [NSString stringWithFormat:@"已显示前 %lu 项", (unsigned long)kDYStorageMaximumSearchResults],
+                                         @"结果较多，请输入更具体的关键词",
+                                         @"ic_search_outlined_20",
+                                         nil);
+        id limitSection = DYStorageMakeSection(@"com.xlzs001.dystorage.search.limit-section",
+                                                @"搜索提示",
+                                                limitItem ? @[ limitItem ] : @[]);
+        if (limitSection) [sections addObject:limitSection];
     }
 
     if (sections.count == 0) {
@@ -2062,7 +2101,17 @@ static void DYStorageInstallAvailableHooks(void) {
                         object:nil
                          queue:[NSOperationQueue mainQueue]
                     usingBlock:^(__unused NSNotification *note) {
-                        DYStorageInstallAvailableHooks();
+                         DYStorageInstallAvailableHooks();
+                     }];
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidEnterBackgroundNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(__unused NSNotification *note) {
+                        // Search navigation is short-lived UI work. Invalidate
+                        // its retry chain immediately when Aweme leaves the
+                        // foreground so it cannot scan windows in the background.
+                        DYStorageClearPendingFeatureNavigation(gDYStorageFeatureNavigationGeneration);
                     }];
     }
 }
